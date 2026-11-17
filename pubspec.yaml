@@ -1,7 +1,7 @@
 name: dji_live_gallery
 description: "Pocket 4P USB 导入与百度网盘实况导出工具"
 publish_to: 'none'
-version: 2.3.0+3
+version: 2.4.0+4
 
 environment:
   sdk: ^3.13.0

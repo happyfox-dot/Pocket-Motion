@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -17,6 +18,7 @@ import 'src/tool_path.dart';
 import 'src/baidu_live_exporter.dart';
 import 'src/baidu_apple_guide_dialog.dart';
 import 'src/camera_discovery.dart';
+import 'src/export_controls.dart';
 import 'src/export_support.dart';
 import 'src/watermark.dart';
 import 'src/watermark_controls.dart';
@@ -87,9 +89,25 @@ class _HomePageState extends State<HomePage> {
   String _searchQuery = '';
 
   bool _scanning = false;
+  int _scanDone = 0;
+  int _scanTotal = 0;
+
   final Set<String> _selected = {};
   String? _anchorPath; // Shift 连选起点
   final List<String> _logs = [];
+
+  // 导出与控制状态
+  ExportControlSettings _exportControls = const ExportControlSettings();
+  String? _detectedHardwareLabel;
+  ExportCancelToken? _cancelToken;
+  Timer? _elapsedTimer;
+  Stopwatch? _exportStopwatch;
+  Duration _exportElapsed = Duration.zero;
+  int _activeWorkers = 1;
+  final List<String> _activeFileNames = [];
+  bool _cancellingExport = false;
+  bool _wasCancelled = false;
+
   bool _exporting = false;
   bool _hasExportSummary = false;
   int _doneCount = 0;
@@ -100,16 +118,35 @@ class _HomePageState extends State<HomePage> {
   bool _findingCamera = false;
   WatermarkSettings _watermark = const WatermarkSettings();
 
+  // 目标目录已有文件名索引（用于标记「已导出」与一键筛选未导出素材）
+  Set<String> _existingBaiduFiles = {};
+  Set<String> _existingLiveFiles = {};
+  Set<String> _existingMovieFiles = {};
+  Set<String> _existingPhotoFiles = {};
+
   @override
   void initState() {
     super.initState();
     _loadSavedDirs();
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      unawaited(_probeHardwareEncoder());
+    }
   }
 
   @override
   void dispose() {
+    _elapsedTimer?.cancel();
+    _cancelToken?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _probeHardwareEncoder() async {
+    try {
+      final hw = await HevcEncoderSelector.detect();
+      if (!mounted) return;
+      setState(() => _detectedHardwareLabel = hw?.label ?? '仅 CPU');
+    } catch (_) {}
   }
 
   static String _defaultCameraDir() => '';
@@ -157,6 +194,9 @@ class _HomePageState extends State<HomePage> {
           final savedView = data['viewMode'];
           setState(() {
             _watermark = WatermarkSettings.fromJson(data['watermark']);
+            _exportControls = ExportControlSettings.fromJson(
+              data['exportControls'],
+            );
             if (savedCamera is String && savedCamera.trim().isNotEmpty) {
               _cameraDir = savedCamera.trim();
             }
@@ -172,6 +212,9 @@ class _HomePageState extends State<HomePage> {
         }
       }
     } catch (_) {}
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      unawaited(_refreshExportedIndex());
+    }
   }
 
   Future<void> _saveDirs() async {
@@ -184,9 +227,60 @@ class _HomePageState extends State<HomePage> {
           'outDir': _outDir,
           'viewMode': _viewMode.name,
           'watermark': _watermark.toJson(),
+          'exportControls': _exportControls.toJson(),
         }),
       );
     } catch (_) {}
+  }
+
+  Future<Set<String>> _listFileNamesLower(String subFolder) async {
+    try {
+      final dir = Directory(p.join(_outDir, subFolder));
+      if (!await dir.exists()) return <String>{};
+      final names = <String>{};
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is File) {
+          names.add(p.basename(entity.path).toLowerCase());
+        }
+      }
+      return names;
+    } catch (_) {
+      return <String>{};
+    }
+  }
+
+  Future<void> _refreshExportedIndex() async {
+    if (_outDir.trim().isEmpty) return;
+    final results = await Future.wait([
+      _listFileNamesLower('baidu_live'),
+      _listFileNamesLower('live'),
+      _listFileNamesLower('movie'),
+      _listFileNamesLower('photo'),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _existingBaiduFiles = results[0];
+      _existingLiveFiles = results[1];
+      _existingMovieFiles = results[2];
+      _existingPhotoFiles = results[3];
+    });
+  }
+
+  bool _isAssetExported(MediaAsset a) {
+    switch (a.kind) {
+      case MediaKind.livePhoto:
+        final stem =
+            '${p.basenameWithoutExtension(a.filename)}${_watermark.outputSuffix}'
+                .toLowerCase();
+        return _existingBaiduFiles.contains('$stem.livp') ||
+            (_existingLiveFiles.contains('${stem}i.heic') &&
+                _existingLiveFiles.contains('${stem}i.mov')) ||
+            _existingLiveFiles.contains('${stem}_mp.jpg');
+      case MediaKind.video:
+        return _existingMovieFiles.contains(a.filename.toLowerCase());
+      case MediaKind.photo:
+        return _existingPhotoFiles.contains(a.filename.toLowerCase());
+    }
   }
 
   int _countByKind(MediaKind kind) =>
@@ -239,13 +333,28 @@ class _HomePageState extends State<HomePage> {
     if (_scanning || _exporting) return;
     setState(() {
       _scanning = true;
+      _scanDone = 0;
+      _scanTotal = 0;
       _selected.clear();
       _anchorPath = null;
       _hasExportSummary = false;
       _logs.clear();
     });
     try {
-      final list = await _scanner.scan(_cameraDir, onWarning: _log);
+      final sw = Stopwatch()..start();
+      final list = await _scanner.scan(
+        _cameraDir,
+        onWarning: _log,
+        onProgress: (done, total) {
+          if (mounted) {
+            setState(() {
+              _scanDone = done;
+              _scanTotal = total;
+            });
+          }
+        },
+      );
+      sw.stop();
       if (!mounted) return;
       setState(() {
         _assets = list;
@@ -255,7 +364,10 @@ class _HomePageState extends State<HomePage> {
           );
         }
       });
-      _log('扫描完成：${list.length} 项，实况 ${_liveAssets.length} 项');
+      await _refreshExportedIndex();
+      _log(
+        '扫描完成：${list.length} 项，实况 ${_liveAssets.length} 项（耗时 ${(sw.elapsedMilliseconds / 1000).toStringAsFixed(2)}s）',
+      );
     } catch (e) {
       if (mounted) setState(() => _assets = []);
       _log('扫描失败：$e');
@@ -350,6 +462,7 @@ class _HomePageState extends State<HomePage> {
     if (dir != null && mounted) {
       setState(() => _outDir = dir);
       await _saveDirs();
+      await _refreshExportedIndex();
     }
   }
 
@@ -412,46 +525,156 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _runExport(Future<dynamic> Function(MediaAsset a) task) async {
+  void _togglePauseExport() {
+    final token = _cancelToken;
+    if (token == null || !_exporting || _cancellingExport) return;
+    setState(() {
+      if (token.isPaused) {
+        token.resume();
+        _exportStopwatch?.start();
+        _log('已恢复导出队列');
+      } else {
+        token.pause();
+        _exportStopwatch?.stop();
+        _log('已暂停导出队列（当前进行中的分片完成后挂起）');
+      }
+    });
+  }
+
+  void _cancelActiveExport() {
+    final token = _cancelToken;
+    if (token == null || !_exporting || _cancellingExport) return;
+    setState(() => _cancellingExport = true);
+    _log('正在取消导出并清理临时目录…');
+    token.cancel();
+  }
+
+  Future<void> _runExport(
+    Future<dynamic> Function(MediaAsset a, ExportOptions options) task, {
+    required bool usesWatermark,
+  }) async {
     final picks = _picked;
     if (picks.isEmpty || _exporting || _scanning) return;
+
+    final token = ExportCancelToken();
+    final configuredWorkers = _exportControls.resolveWorkers(
+      watermarkEnabled: usesWatermark,
+    );
+    final actualWorkers = configuredWorkers > picks.length
+        ? picks.length
+        : configuredWorkers;
+    final sw = Stopwatch()..start();
+
     setState(() {
       _exporting = true;
+      _cancellingExport = false;
+      _wasCancelled = false;
       _hasExportSummary = false;
+      _cancelToken = token;
+      _exportStopwatch = sw;
+      _exportElapsed = Duration.zero;
+      _activeWorkers = actualWorkers;
+      _activeFileNames.clear();
       _doneCount = 0;
       _totalCount = picks.length;
       _success = 0;
       _fail = 0;
       _skipped = 0;
     });
+
+    _elapsedTimer?.cancel();
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _exporting) {
+        setState(() => _exportElapsed = sw.elapsed);
+      }
+    });
+
     try {
       await validateExportLocation(_cameraDir, _outDir);
       await Directory(_outDir).create(recursive: true);
     } catch (e) {
+      _elapsedTimer?.cancel();
       _log('无法准备导出：$e');
-      if (mounted) setState(() => _exporting = false);
+      if (mounted) {
+        setState(() {
+          _exporting = false;
+          _cancelToken = null;
+        });
+      }
       return;
     }
     if (!mounted) return;
-    for (final a in picks) {
-      try {
-        await task(a);
-        _success++;
-      } on ExportSkipped catch (e) {
-        _skipped++;
-        _log(e.toString());
-      } catch (e) {
-        _fail++;
-        _log('失败: ${a.filename} ($e)');
+
+    final options = ExportOptions(
+      conflictPolicy: _exportControls.conflictPolicy,
+      useHardwareAccel: _exportControls.useHardwareAccel,
+      cancelToken: token,
+    );
+
+    var cursor = 0;
+    Future<void> runWorker() async {
+      while (!token.isCancelled) {
+        try {
+          await token.checkpoint();
+        } on ExportCancelled {
+          break;
+        }
+        final idx = cursor++;
+        if (idx >= picks.length) break;
+        final item = picks[idx];
+        if (mounted) {
+          setState(() => _activeFileNames.add(item.filename));
+        }
+        try {
+          await task(item, options);
+          _success++;
+        } on ExportCancelled {
+          break;
+        } on ExportSkipped catch (e) {
+          _skipped++;
+          _log(e.toString());
+        } catch (e) {
+          if (token.isCancelled) break;
+          _fail++;
+          _log('失败: ${item.filename} ($e)');
+        } finally {
+          if (mounted) {
+            setState(() {
+              _activeFileNames.remove(item.filename);
+              if (!token.isCancelled) {
+                _doneCount++;
+              }
+            });
+          }
+        }
       }
-      if (mounted) setState(() => _doneCount++);
     }
-    _log('完成：成功 $_success，跳过 $_skipped，失败 $_fail');
-    if (mounted) {
-      setState(() {
-        _exporting = false;
-        _hasExportSummary = true;
-      });
+
+    await Future.wait(List.generate(actualWorkers, (_) => runWorker()));
+
+    sw.stop();
+    _elapsedTimer?.cancel();
+    final cancelled = token.isCancelled;
+    final sec = (sw.elapsedMilliseconds / 1000).toStringAsFixed(1);
+    if (cancelled) {
+      _log('已取消导出：已完成 $_success，跳过 $_skipped，失败 $_fail（用时 ${sec}s）');
+    } else {
+      _log('完成：成功 $_success，跳过 $_skipped，失败 $_fail（${actualWorkers}x 并发，用时 ${sec}s）');
+    }
+
+    await _refreshExportedIndex();
+    if (!mounted) return;
+    setState(() {
+      _exporting = false;
+      _cancellingExport = false;
+      _wasCancelled = cancelled;
+      _hasExportSummary = true;
+      _activeFileNames.clear();
+      _cancelToken = null;
+    });
+
+    if (!cancelled && _success > 0 && _exportControls.openFolderWhenDone) {
+      unawaited(_openOutput());
     }
   }
 
@@ -459,9 +682,13 @@ class _HomePageState extends State<HomePage> {
     final target = p.join(_outDir, 'baidu_live');
     final watermark = _watermark;
     _runExport(
-      (a) => BaiduLiveExporter(
-        onLog: _log,
-      ).export(asset: a, outDir: target, watermark: watermark),
+      (a, options) => BaiduLiveExporter(onLog: _log).export(
+        asset: a,
+        outDir: target,
+        watermark: watermark,
+        options: options,
+      ),
+      usesWatermark: watermark.enabled,
     );
   }
 
@@ -469,9 +696,13 @@ class _HomePageState extends State<HomePage> {
     final liveOutDir = p.join(_outDir, 'live');
     final watermark = _watermark;
     _runExport(
-      (a) => LivePhotoExporter(
-        onLog: _log,
-      ).export(asset: a, outDir: liveOutDir, watermark: watermark),
+      (a, options) => LivePhotoExporter(onLog: _log).export(
+        asset: a,
+        outDir: liveOutDir,
+        watermark: watermark,
+        options: options,
+      ),
+      usesWatermark: watermark.enabled,
     );
   }
 
@@ -479,35 +710,52 @@ class _HomePageState extends State<HomePage> {
     final liveOutDir = p.join(_outDir, 'live');
     final watermark = _watermark;
     _runExport(
-      (a) => MotionPhotoExporter(
-        onLog: _log,
-      ).export(asset: a, outDir: liveOutDir, watermark: watermark),
+      (a, options) => MotionPhotoExporter(onLog: _log).export(
+        asset: a,
+        outDir: liveOutDir,
+        watermark: watermark,
+        options: options,
+      ),
+      usesWatermark: watermark.enabled,
     );
   }
 
   void _exportVideos() {
     final movieOutDir = p.join(_outDir, 'movie');
-    _runExport((a) => _copyMediaFile(a, movieOutDir, 'movie'));
+    _runExport(
+      (a, options) => _copyMediaFile(a, movieOutDir, 'movie', options),
+      usesWatermark: false,
+    );
   }
 
   void _exportPhotos() {
     final photoOutDir = p.join(_outDir, 'photo');
-    _runExport((a) => _copyMediaFile(a, photoOutDir, 'photo'));
+    _runExport(
+      (a, options) => _copyMediaFile(a, photoOutDir, 'photo', options),
+      usesWatermark: false,
+    );
   }
 
   Future<void> _copyMediaFile(
     MediaAsset asset,
     String targetDir,
     String folderLabel,
+    ExportOptions options,
   ) async {
+    await options.cancelToken?.checkpoint();
     await Directory(targetDir).create(recursive: true);
-    final destPath = p.join(targetDir, asset.filename);
-    await ensureOutputsAvailable([destPath]);
+    final desiredPath = p.join(targetDir, asset.filename);
+    final destPath = (await resolveExportTargets(
+      [desiredPath],
+      options.conflictPolicy,
+    )).single;
+
     _log('导出: ${asset.filename} -> $folderLabel/');
     final staging = await Directory(targetDir).createTemp('.pocket-copy-');
     final pending = p.join(staging.path, asset.filename);
     try {
       await File(asset.path).copy(pending);
+      await options.cancelToken?.checkpoint();
 
       DateTime? shotAt = asset.shotAt;
       if (shotAt == null) {
@@ -530,9 +778,8 @@ class _HomePageState extends State<HomePage> {
           await File(pending).setLastModified(shotAt);
         } catch (_) {}
       }
-      await ensureOutputsAvailable([destPath]);
-      await File(pending).rename(destPath);
-      _log('完成: $folderLabel/${asset.filename}');
+      await publishStagedFile(pending, destPath, options.conflictPolicy);
+      _log('完成: $folderLabel/${p.basename(destPath)}');
     } finally {
       if (await staging.exists()) await staging.delete(recursive: true);
     }
@@ -553,7 +800,7 @@ class _HomePageState extends State<HomePage> {
       body: Row(
         children: [
           Container(
-            width: 326,
+            width: 332,
             decoration: const BoxDecoration(
               color: Color(0xFFF8FAFC),
               border: Border(right: BorderSide(color: Color(0xFFE2E8F0))),
@@ -711,10 +958,10 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 10),
 
-          // Step 3: 导出格式 / 操作
+          // Step 3: 导出格式 / 控制组件
           _SidebarCard(
             step: '3',
-            title: _filter == MediaKind.livePhoto ? '导出格式' : '导出操作',
+            title: _filter == MediaKind.livePhoto ? '导出格式与控制' : '导出操作与控制',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -727,53 +974,35 @@ class _HomePageState extends State<HomePage> {
                       _saveDirs();
                     },
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 8),
                 ],
+                ExportSettingsPanel(
+                  settings: _exportControls,
+                  locked: _exporting,
+                  showHardwareToggle: _filter == MediaKind.livePhoto,
+                  hardwareLabel: _detectedHardwareLabel,
+                  onChanged: (next) {
+                    setState(() => _exportControls = next);
+                    _saveDirs();
+                  },
+                ),
+                const SizedBox(height: 10),
                 _buildExportButtons(),
                 if (_exporting) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF0FDFA),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFF99F6E4)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              '正在导出 $_doneCount / $_totalCount',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF0F766E),
-                              ),
-                            ),
-                            Text(
-                              '成功 $_success · 失败 $_fail',
-                              style: const TextStyle(
-                                fontSize: 11,
-                                color: Color(0xFF475569),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            minHeight: 6,
-                            value: _totalCount == 0
-                                ? 0
-                                : _doneCount / _totalCount,
-                          ),
-                        ),
-                      ],
-                    ),
+                  const SizedBox(height: 10),
+                  ActiveExportControlCard(
+                    doneCount: _doneCount,
+                    totalCount: _totalCount,
+                    successCount: _success,
+                    skippedCount: _skipped,
+                    failCount: _fail,
+                    workerCount: _activeWorkers,
+                    paused: _cancelToken?.isPaused ?? false,
+                    cancelling: _cancellingExport,
+                    activeNames: _activeFileNames,
+                    elapsed: _exportElapsed,
+                    onTogglePause: _togglePauseExport,
+                    onCancel: _cancelActiveExport,
                   ),
                 ] else if (_hasExportSummary) ...[
                   const SizedBox(height: 10),
@@ -785,11 +1014,15 @@ class _HomePageState extends State<HomePage> {
                     decoration: BoxDecoration(
                       color: _fail > 0
                           ? const Color(0xFFFEF2F2)
+                          : _wasCancelled
+                          ? const Color(0xFFFFFBEB)
                           : const Color(0xFFF0FDFA),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
                         color: _fail > 0
                             ? const Color(0xFFFECACA)
+                            : _wasCancelled
+                            ? const Color(0xFFFDE68A)
                             : const Color(0xFF99F6E4),
                       ),
                     ),
@@ -798,16 +1031,20 @@ class _HomePageState extends State<HomePage> {
                         Icon(
                           _fail > 0
                               ? Icons.info_outline_rounded
+                              : _wasCancelled
+                              ? Icons.pause_circle_outline_rounded
                               : Icons.check_circle_outline_rounded,
                           size: 16,
                           color: _fail > 0
                               ? const Color(0xFFDC2626)
+                              : _wasCancelled
+                              ? const Color(0xFFB45309)
                               : const Color(0xFF0D9488),
                         ),
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            '完成：成功 $_success · 跳过 $_skipped · 失败 $_fail',
+                            '${_wasCancelled ? '已取消' : '完成'}：成功 $_success · 跳过 $_skipped · 失败 $_fail',
                             style: const TextStyle(
                               fontSize: 11.5,
                               color: Color(0xFF1E293B),
@@ -970,7 +1207,10 @@ class _HomePageState extends State<HomePage> {
 
   static Color _logColor(String line) {
     if (line.contains('失败')) return const Color(0xFFFCA5A5);
-    if (line.contains('跳过') || line.contains('已存在')) {
+    if (line.contains('跳过') ||
+        line.contains('已存在') ||
+        line.contains('取消') ||
+        line.contains('暂停')) {
       return const Color(0xFFFCD34D);
     }
     if (line.contains('完成') || line.contains('已生成')) {
@@ -1064,6 +1304,9 @@ class _HomePageState extends State<HomePage> {
     final picked = _picked;
     final allSelected =
         visible.isNotEmpty && visible.every((a) => _selected.contains(a.path));
+    final unexportedInVisible = visible
+        .where((a) => !_isAssetExported(a))
+        .toList();
 
     return Column(
       children: [
@@ -1122,7 +1365,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     const SizedBox(height: 2),
                     const Text(
-                      'Pocket 4P · USB / 本地素材 · 百度网盘实况导出',
+                      'Pocket 4P · 并行导出加速 · 百度网盘实况导出',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
@@ -1306,7 +1549,7 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
-        // 批量选择工具栏
+        // 批量选择工具栏（含「仅选未导出」增量筛选）
         Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
@@ -1352,6 +1595,21 @@ class _HomePageState extends State<HomePage> {
                     }
                   }),
                   child: const Text('反选'),
+                ),
+              if (visible.isNotEmpty &&
+                  unexportedInVisible.length < visible.length &&
+                  unexportedInVisible.isNotEmpty)
+                TextButton.icon(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () => setState(() {
+                    _selected
+                      ..removeAll(visible.map((a) => a.path))
+                      ..addAll(unexportedInVisible.map((a) => a.path));
+                  }),
+                  icon: const Icon(Icons.fiber_new_outlined, size: 16),
+                  label: Text('仅选未导出 (${unexportedInVisible.length})'),
                 ),
               if (picked.isNotEmpty)
                 TextButton(
@@ -1449,15 +1707,18 @@ class _HomePageState extends State<HomePage> {
   Widget _buildEmptyState() {
     final busy = _scanning || _exporting || _findingCamera;
     if (_scanning) {
-      return const Center(
+      final progressLabel = _scanTotal > 0
+          ? '正在并行读取并识别素材标记 ($_scanDone / $_scanTotal)…'
+          : '正在读取并识别素材标记…';
+      return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 14),
+            const CircularProgressIndicator(),
+            const SizedBox(height: 14),
             Text(
-              '正在读取并识别素材标记…',
-              style: TextStyle(color: Color(0xFF475569), fontSize: 13.5),
+              progressLabel,
+              style: const TextStyle(color: Color(0xFF475569), fontSize: 13.5),
             ),
           ],
         ),
@@ -1493,19 +1754,19 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (_assets.isNotEmpty) {
-      return Center(
+      return const Center(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
+              Icon(
                 Icons.perm_media_outlined,
                 size: 40,
                 color: Color(0xFF94A3B8),
               ),
-              const SizedBox(height: 12),
-              const Text(
+              SizedBox(height: 12),
+              Text(
                 '此分类没有素材',
                 style: TextStyle(
                   fontSize: 15,
@@ -1513,8 +1774,8 @@ class _HomePageState extends State<HomePage> {
                   color: Color(0xFF1E293B),
                 ),
               ),
-              const SizedBox(height: 6),
-              const Text(
+              SizedBox(height: 6),
+              Text(
                 '只有带 TPLG 实况标记的原始相机视频可导出实况；其余视频可在「视频」分类预览和复制。',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12.5, color: Color(0xFF64748B)),
@@ -1564,7 +1825,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  '自动识别带实况标记的原始 MP4，一键封装为百度网盘 .livp 或 Apple 实况，不改动相机源文件。',
+                  '支持并行极速扫描、GPU 水印加速与后台流式封装，一键导出百度网盘 .livp 或 Apple 实况。',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12.5,
@@ -1606,6 +1867,7 @@ class _HomePageState extends State<HomePage> {
       itemBuilder: (_, i) {
         final a = visible[i];
         final selected = _selected.contains(a.path);
+        final exported = _isAssetExported(a);
         return Material(
           key: ValueKey(a.path),
           color: selected ? const Color(0xFFF0FDFA) : Colors.white,
@@ -1637,15 +1899,45 @@ class _HomePageState extends State<HomePage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          a.filename,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF0F172A),
-                          ),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                a.filename,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF0F172A),
+                                ),
+                              ),
+                            ),
+                            if (exported) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 5,
+                                  vertical: 1,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFECFDF5),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                    color: const Color(0xFFA7F3D0),
+                                  ),
+                                ),
+                                child: const Text(
+                                  '已导出',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF059669),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         const SizedBox(height: 4),
                         Wrap(
@@ -1739,6 +2031,7 @@ class _HomePageState extends State<HomePage> {
                   File(a.path),
                   width: 76,
                   height: 50,
+                  cacheWidth: 160,
                   fit: BoxFit.cover,
                   errorBuilder: (_, _, _) => const Icon(
                     Icons.image_outlined,
@@ -1770,6 +2063,7 @@ class _HomePageState extends State<HomePage> {
       itemBuilder: (_, i) {
         final a = visible[i];
         final selected = _selected.contains(a.path);
+        final exported = _isAssetExported(a);
         return Material(
           key: ValueKey(a.path),
           color: selected ? const Color(0xFFF0FDFA) : Colors.white,
@@ -1799,6 +2093,29 @@ class _HomePageState extends State<HomePage> {
                     fit: StackFit.expand,
                     children: [
                       _buildGridCover(a),
+                      if (exported)
+                        Positioned(
+                          top: 6,
+                          left: 6,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 5,
+                              vertical: 1.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xD9059669),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              '已导出',
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
                       if (a.friendlySpec.isNotEmpty)
                         Positioned(
                           right: 6,
@@ -1907,6 +2224,7 @@ class _HomePageState extends State<HomePage> {
       }
       return Image.file(
         File(a.path),
+        cacheWidth: 360,
         fit: BoxFit.cover,
         errorBuilder: (_, _, _) => const ColoredBox(
           color: Color(0xFFEFF2F6),
@@ -2070,7 +2388,9 @@ class _PathCard extends StatelessWidget {
           Icon(
             isOut
                 ? Icons.drive_folder_upload_outlined
-                : (empty ? Icons.folder_off_outlined : Icons.sd_storage_outlined),
+                : (empty
+                      ? Icons.folder_off_outlined
+                      : Icons.sd_storage_outlined),
             size: 18,
             color: empty ? const Color(0xFF94A3B8) : const Color(0xFF0D9488),
           ),
