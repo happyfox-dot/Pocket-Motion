@@ -7,17 +7,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:path/path.dart' as p;
 
+import 'live_media_resolver.dart';
 import 'models.dart';
+import 'ui_tokens.dart';
 
-/// Read-only source preview. Export effects are intentionally not rendered here.
+/// Built-in Live Photo & Video player inspired by Apple LivePhotosKit JS & JarkViewer.
+/// Supports camera raw MP4s, `.livp` archives, Apple `.HEIC+.MOV` pairs, Android Motion Photos,
+/// standard videos, and high-zoom static photos.
 class MediaPreviewDialog extends StatefulWidget {
   final MediaAsset asset;
   final List<MediaAsset>? playlist;
   final int? initialIndex;
   final bool Function(MediaAsset)? isSelected;
   final ValueChanged<MediaAsset>? onToggleSelect;
+  final bool? autoPlay;
 
   const MediaPreviewDialog({
     super.key,
@@ -26,6 +30,7 @@ class MediaPreviewDialog extends StatefulWidget {
     this.initialIndex,
     this.isSelected,
     this.onToggleSelect,
+    this.autoPlay,
   });
 
   @override
@@ -38,14 +43,23 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   late int _currentIndex = _resolveInitialIndex();
   int _loadGeneration = 0;
+
+  ResolvedPlayableMedia? _resolved;
   bool _loading = true;
   bool _playing = false;
   bool _muted = false;
+  double _volume = 100;
+  double _speed = 1.0;
+  bool _showingStaticCoverOnly = false;
+  bool _vitalityZoom = false;
   late bool _loop = _currentAsset.kind == MediaKind.livePhoto;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   double? _dragPosition;
   String? _error;
+
+  bool get _effectiveAutoPlay =>
+      widget.autoPlay ?? !Platform.environment.containsKey('FLUTTER_TEST');
 
   int _resolveInitialIndex() {
     final list = widget.playlist;
@@ -67,7 +81,15 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     return widget.asset;
   }
 
-  bool get _isPhoto => _currentAsset.kind == MediaKind.photo;
+  bool get _isPurePhoto =>
+      _resolved != null
+          ? _resolved!.isPurePhoto
+          : _currentAsset.kind == MediaKind.photo;
+
+  bool get _isLivePhoto =>
+      _resolved != null
+          ? _resolved!.isLivePhoto
+          : _currentAsset.kind == MediaKind.livePhoto;
 
   bool get _hasPrev => widget.playlist != null && _currentIndex > 0;
   bool get _hasNext =>
@@ -99,8 +121,11 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     if (!mounted) return;
     setState(() {
       _currentIndex = newIndex;
+      _resolved = null;
       _loading = true;
       _playing = false;
+      _showingStaticCoverOnly = false;
+      _vitalityZoom = false;
       _position = Duration.zero;
       _duration = Duration.zero;
       _dragPosition = null;
@@ -114,19 +139,15 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     final generation = ++_loadGeneration;
     final asset = _currentAsset;
     try {
-      if (!await File(asset.path).exists()) {
-        throw const FileSystemException('文件不可用，请检查相机连接或重新扫描');
-      }
+      final resolved = await LiveMediaResolver.resolve(asset);
       if (!mounted || generation != _loadGeneration) return;
-      if (_isPhoto) {
-        if (p.extension(asset.path).toLowerCase() == '.dng') {
-          throw const FormatException('暂不支持 DNG 原始照片预览，请查看配套 JPEG 照片');
-        }
+      _resolved = resolved;
+
+      if (resolved.isPurePhoto) {
         setState(() => _loading = false);
         return;
       }
-      // Lazy initialization keeps photo browsing/export usable if player DLLs
-      // are missing; the error is displayed inside this preview only.
+
       MediaKit.ensureInitialized();
       final player = Player();
       _player = player;
@@ -134,7 +155,10 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
       _subscriptions.addAll([
         player.stream.playing.listen((value) {
           if (mounted && generation == _loadGeneration) {
-            setState(() => _playing = value);
+            setState(() {
+              _playing = value;
+              if (!value) _vitalityZoom = false;
+            });
           }
         }),
         player.stream.position.listen((value) {
@@ -151,20 +175,25 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
           if (generation == _loadGeneration) _showError(msg);
         }),
       ]);
-      // Surface native video-output initialization failures in the dialog too.
+
       await _video!.platform.future;
       if (!mounted || generation != _loadGeneration) return;
-      if (_muted) {
-        await player.setVolume(0);
+
+      await player.setVolume(_muted ? 0 : _volume);
+      if (_speed != 1.0) {
+        await player.setRate(_speed);
       }
       if (!mounted || generation != _loadGeneration) return;
+
+      final shouldLoop = resolved.isLivePhoto ? _loop : _loop;
       await player.setPlaylistMode(
-        _loop ? PlaylistMode.single : PlaylistMode.none,
+        shouldLoop ? PlaylistMode.single : PlaylistMode.none,
       );
       if (!mounted || generation != _loadGeneration) return;
+
       await player.open(
-        Media(File(asset.path).absolute.uri.toString()),
-        play: false,
+        Media(File(resolved.videoPath!).absolute.uri.toString()),
+        play: _effectiveAutoPlay,
       );
       if (mounted && generation == _loadGeneration) {
         setState(() => _loading = false);
@@ -195,15 +224,34 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   }
 
   Future<void> _togglePlay() => _control((player) async {
+    if (_showingStaticCoverOnly) {
+      setState(() => _showingStaticCoverOnly = false);
+    }
     if (player.state.completed) await player.seek(Duration.zero);
     await player.playOrPause();
   });
 
+  /// LivePhotosKit / JarkViewer style replay: hovering or clicking the LIVE badge
+  /// or long-pressing the viewport plays the Live Photo from start with subtle vitality zoom.
+  Future<void> _triggerLiveReplay() => _control((player) async {
+    if (_showingStaticCoverOnly) {
+      setState(() => _showingStaticCoverOnly = false);
+    }
+    setState(() => _vitalityZoom = true);
+    await player.seek(Duration.zero);
+    await player.play();
+  });
+
   Future<void> _toggleMute() async {
-    if (_loading || _isPhoto || _error != null) return;
+    if (_loading || _isPurePhoto || _error != null) return;
     final muted = !_muted;
-    await _control((player) => player.setVolume(muted ? 0 : 100));
+    await _control((player) => player.setVolume(muted ? 0 : _volume));
     if (mounted) setState(() => _muted = muted);
+  }
+
+  Future<void> _setSpeed(double rate) async {
+    await _control((player) => player.setRate(rate));
+    if (mounted) setState(() => _speed = rate);
   }
 
   void _toggleSelectCurrent() {
@@ -221,8 +269,6 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     }
     final player = _player;
     if (player != null) {
-      // dispose stops audio and releases the camera file, including when the
-      // dialog is closed with Escape/outside click during an in-flight open.
       unawaited(player.dispose().catchError((Object _) {}));
     }
     super.dispose();
@@ -234,11 +280,12 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     final asset = _currentAsset;
     final selected = widget.isSelected?.call(asset) ?? false;
     final listLen = widget.playlist?.length ?? 0;
+    final formatBadge = _resolved?.formatBadge ?? asset.kindLabel;
 
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.space): () {
-          if (!_isPhoto && !_loading && _error == null) {
+          if (!_isPurePhoto && !_loading && _error == null) {
             _togglePlay();
           }
         },
@@ -262,16 +309,17 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
           insetPadding: const EdgeInsets.all(20),
           clipBehavior: Clip.antiAlias,
           child: SizedBox(
-            width: (screen.width - 40).clamp(0, 1120),
-            height: (screen.height - 40).clamp(0, 820),
+            width: (screen.width - 40).clamp(0, 1140),
+            height: (screen.height - 40).clamp(0, 840),
             child: Column(
               children: [
+                // 顶部标题栏
                 Container(
                   padding: const EdgeInsets.fromLTRB(18, 10, 10, 10),
                   decoration: const BoxDecoration(
                     color: Colors.white,
                     border: Border(
-                      bottom: BorderSide(color: Color(0xFFE2E8F0)),
+                      bottom: BorderSide(color: UiTokens.border),
                     ),
                   ),
                   child: Row(
@@ -280,21 +328,21 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                         width: 34,
                         height: 34,
                         decoration: BoxDecoration(
-                          color: asset.kind == MediaKind.livePhoto
-                              ? const Color(0xFFE6FFFA)
-                              : const Color(0xFFF1F5F9),
+                          color: _isLivePhoto
+                              ? UiTokens.primarySoft
+                              : UiTokens.mutedBg,
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Icon(
-                          asset.kind == MediaKind.livePhoto
+                          _isLivePhoto
                               ? Icons.motion_photos_on
-                              : _isPhoto
+                              : _isPurePhoto
                               ? Icons.image_outlined
                               : Icons.play_circle_outline,
                           size: 19,
-                          color: asset.kind == MediaKind.livePhoto
-                              ? const Color(0xFF0D9488)
-                              : const Color(0xFF475569),
+                          color: _isLivePhoto
+                              ? UiTokens.primary
+                              : UiTokens.textSecondary,
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -312,26 +360,54 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                                     style: const TextStyle(
                                       fontWeight: FontWeight.w600,
                                       fontSize: 14,
-                                      color: Color(0xFF0F172A),
+                                      color: UiTokens.textPrimary,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 1.5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: _isLivePhoto
+                                        ? UiTokens.primaryTint
+                                        : UiTokens.mutedBg,
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: Border.all(
+                                      color: _isLivePhoto
+                                          ? UiTokens.primaryBorder
+                                          : UiTokens.border,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    formatBadge,
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w600,
+                                      color: _isLivePhoto
+                                          ? UiTokens.primaryDark
+                                          : UiTokens.textSecondary,
                                     ),
                                   ),
                                 ),
                                 if (listLen > 1) ...[
-                                  const SizedBox(width: 8),
+                                  const SizedBox(width: 6),
                                   Container(
                                     padding: const EdgeInsets.symmetric(
                                       horizontal: 6,
                                       vertical: 1.5,
                                     ),
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFFF1F5F9),
+                                      color: UiTokens.mutedBg,
                                       borderRadius: BorderRadius.circular(4),
                                     ),
                                     child: Text(
                                       '${_currentIndex + 1} / $listLen',
                                       style: const TextStyle(
                                         fontSize: 11,
-                                        color: Color(0xFF475569),
+                                        color: UiTokens.textSecondary,
                                         fontWeight: FontWeight.w500,
                                       ),
                                     ),
@@ -342,19 +418,27 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                             const SizedBox(height: 2),
                             Text(
                               [
-                                '${asset.kindLabel} · 原始素材预览',
                                 if (asset.sizeBytes > 0)
                                   '${(asset.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB',
                                 if (asset.friendlySpec.isNotEmpty)
                                   asset.friendlySpec,
                                 if (asset.shotAt != null)
                                   _fmtShot(asset.shotAt!),
-                              ].join('  ·  '),
+                              ].isEmpty
+                                  ? '${asset.kindLabel}播放器'
+                                  : [
+                                      if (asset.sizeBytes > 0)
+                                        '${(asset.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB',
+                                      if (asset.friendlySpec.isNotEmpty)
+                                        asset.friendlySpec,
+                                      if (asset.shotAt != null)
+                                        _fmtShot(asset.shotAt!),
+                                    ].join('  ·  '),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 fontSize: 11.5,
-                                color: Color(0xFF64748B),
+                                color: UiTokens.textMuted,
                               ),
                             ),
                           ],
@@ -382,16 +466,16 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                           style: OutlinedButton.styleFrom(
                             visualDensity: VisualDensity.compact,
                             backgroundColor: selected
-                                ? const Color(0xFFF0FDFA)
+                                ? UiTokens.primaryTint
                                 : null,
                             side: BorderSide(
                               color: selected
-                                  ? const Color(0xFF0D9488)
-                                  : const Color(0xFFCBD5E1),
+                                  ? UiTokens.primary
+                                  : UiTokens.borderStrong,
                             ),
                             foregroundColor: selected
-                                ? const Color(0xFF0F766E)
-                                : const Color(0xFF334155),
+                                ? UiTokens.primaryDark
+                                : UiTokens.textSecondary,
                           ),
                           onPressed: _toggleSelectCurrent,
                           icon: Icon(
@@ -415,28 +499,36 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                     ],
                   ),
                 ),
+
+                // 中央播放舞台
                 Expanded(
                   child: ColoredBox(
-                    color: const Color(0xFF0B0F17),
+                    color: UiTokens.darkStage,
                     child: _buildContent(),
                   ),
                 ),
-                if (!_isPhoto && _error == null) _buildControls(),
+
+                // 视频与实况控制栏
+                if (!_isPurePhoto && _error == null) _buildControls(),
+
+                // 底部统一交互提示条
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 16,
-                    vertical: 9,
+                    vertical: 8,
                   ),
-                  color: const Color(0xFFF8FAFC),
+                  color: UiTokens.subtleBg,
                   child: Text(
-                    _isPhoto
-                        ? '滚轮或双指缩放、拖动查看细节${listLen > 1 ? ' · 键盘 ← / → 切换素材' : ''} · 预览不会修改源文件'
-                        : '点击画面或按空格键播放 / 暂停${listLen > 1 ? ' · ← / → 切换素材' : ''} · 此处显示相机原片，机型水印在导出时合成',
+                    _isPurePhoto
+                        ? '滚轮或双指缩放、拖动查看细节${listLen > 1 ? ' · ← / → 切换上一张/下一张' : ''}'
+                        : _isLivePhoto
+                        ? '实况播放：悬停或点击左上角「LIVE」角标、长按画面或按空格可随时重播实况动效${listLen > 1 ? ' · ← / → 切换素材' : ''}'
+                        : '视频播放：点击画面或按空格键播放 / 暂停 · 支持倍速与音量调节${listLen > 1 ? ' · ← / → 切换素材' : ''}',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 11.5,
-                      color: Color(0xFF64748B),
+                      color: UiTokens.textMuted,
                     ),
                   ),
                 ),
@@ -488,12 +580,13 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
         child: CircularProgressIndicator(color: Colors.white70),
       );
     }
-    if (_isPhoto) {
+    if (_isPurePhoto) {
+      final imgPath = _resolved?.coverImagePath ?? _currentAsset.path;
       return InteractiveViewer(
         maxScale: 8,
         child: Center(
           child: Image.file(
-            File(_currentAsset.path),
+            File(imgPath),
             fit: BoxFit.contain,
             errorBuilder: (_, _, _) => const Text(
               '无法解码这张照片，请检查文件是否完整',
@@ -503,18 +596,36 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
         ),
       );
     }
+
+    final coverPath = _resolved?.coverImagePath;
+    final showStaticOverlay =
+        _isLivePhoto && coverPath != null && _showingStaticCoverOnly;
+
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: _togglePlay,
+      onLongPressStart: _isLivePhoto ? (_) => _triggerLiveReplay() : null,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Video(
-            controller: _video!,
-            fit: BoxFit.contain,
-            controls: NoVideoControls,
+          AnimatedScale(
+            scale: _vitalityZoom && _playing ? 1.018 : 1.0,
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeOutCubic,
+            child: Video(
+              controller: _video!,
+              fit: BoxFit.contain,
+              controls: NoVideoControls,
+            ),
           ),
-          if (!_playing)
+          if (showStaticOverlay)
+            ColoredBox(
+              color: UiTokens.darkStage,
+              child: Center(
+                child: Image.file(File(coverPath), fit: BoxFit.contain),
+              ),
+            ),
+          if (!_playing && !showStaticOverlay)
             Center(
               child: IgnorePointer(
                 child: Container(
@@ -536,6 +647,103 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                 ),
               ),
             ),
+
+          // LivePhotosKit / iOS Photos interactive LIVE badge in top-left corner
+          if (_isLivePhoto)
+            Positioned(
+              left: 16,
+              top: 14,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    onEnter: (_) => _triggerLiveReplay(),
+                    child: GestureDetector(
+                      onTap: _triggerLiveReplay,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _playing && !showStaticOverlay
+                              ? UiTokens.primary.withValues(alpha: 0.88)
+                              : Colors.black.withValues(alpha: 0.58),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.28),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.motion_photos_on_rounded,
+                              size: 15,
+                              color: _playing && !showStaticOverlay
+                                  ? Colors.white
+                                  : const Color(0xFF5EEAD4),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              _playing && !showStaticOverlay
+                                  ? 'LIVE 播放中'
+                                  : 'LIVE 实况',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.4,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (coverPath != null) ...[
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () async {
+                        final next = !_showingStaticCoverOnly;
+                        if (next && _playing) {
+                          await _control((p) => p.pause());
+                        }
+                        if (mounted) {
+                          setState(() => _showingStaticCoverOnly = next);
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: showStaticOverlay
+                              ? Colors.white.withValues(alpha: 0.90)
+                              : Colors.black.withValues(alpha: 0.52),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.25),
+                          ),
+                        ),
+                        child: Text(
+                          showStaticOverlay ? '正在看静态封面' : '对比静态封面',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: showStaticOverlay
+                                ? UiTokens.textPrimary
+                                : Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -547,13 +755,15 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
         .clamp(0.0, maxMs > 0 ? maxMs : 1.0);
     return Container(
       color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
       child: Row(
         children: [
           IconButton(
             tooltip: _playing ? '暂停' : '播放',
             onPressed: _loading ? null : _togglePlay,
-            icon: Icon(_playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
+            icon: Icon(
+              _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+            ),
           ),
           Text(
             _clock(Duration(milliseconds: position.round())),
@@ -570,6 +780,9 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                   ? null
                   : (value) => setState(() => _dragPosition = value),
               onChangeEnd: (value) async {
+                if (_showingStaticCoverOnly) {
+                  setState(() => _showingStaticCoverOnly = false);
+                }
                 await _control(
                   (player) =>
                       player.seek(Duration(milliseconds: value.round())),
@@ -585,14 +798,68 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
               fontFeatures: [FontFeature.tabularFigures()],
             ),
           ),
+          const SizedBox(width: 6),
+          // 倍速选择
+          PopupMenuButton<double>(
+            tooltip: '播放速度',
+            enabled: !_loading,
+            initialValue: _speed,
+            onSelected: _setSpeed,
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 0.5, child: Text('0.5x 慢放')),
+              PopupMenuItem(value: 1.0, child: Text('1.0x 正常')),
+              PopupMenuItem(value: 1.5, child: Text('1.5x 倍速')),
+              PopupMenuItem(value: 2.0, child: Text('2.0x 倍速')),
+            ],
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+              decoration: BoxDecoration(
+                color: _speed != 1.0 ? UiTokens.primaryTint : UiTokens.mutedBg,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '${_speed}x',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: _speed != 1.0
+                      ? UiTokens.primaryDark
+                      : UiTokens.textSecondary,
+                ),
+              ),
+            ),
+          ),
           IconButton(
             tooltip: _muted ? '打开声音' : '静音',
             onPressed: _loading ? null : _toggleMute,
             icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
           ),
+          SizedBox(
+            width: 76,
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 3,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+              ),
+              child: Slider(
+                value: _muted ? 0 : _volume,
+                max: 100,
+                onChanged: _loading
+                    ? null
+                    : (val) async {
+                        setState(() {
+                          _volume = val;
+                          _muted = val == 0;
+                        });
+                        await _control((p) => p.setVolume(val));
+                      },
+              ),
+            ),
+          ),
           IconButton(
             tooltip: _loop ? '关闭循环播放' : '开启循环播放',
-            color: _loop ? const Color(0xFF0D9488) : null,
+            color: _loop ? UiTokens.primary : null,
             onPressed: _loading
                 ? null
                 : () async {

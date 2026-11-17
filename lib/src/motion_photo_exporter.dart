@@ -57,11 +57,15 @@ class MotionPhotoExporter {
       );
       final deviceLabel =
           mp4Info.model.toUpperCase().startsWith(mp4Info.make.toUpperCase())
-          ? mp4Info.model
-          : '${mp4Info.make} ${mp4Info.model}';
+          ? mp4Info.model.trim()
+          : '${mp4Info.make} ${mp4Info.model}'.trim();
 
       // 1) 抽中间帧为纯 JPEG
-      _log('抽帧: ${p.basenameWithoutExtension(outPath)} ($deviceLabel)');
+      _log(
+        deviceLabel.isEmpty
+            ? '抽帧: ${p.basenameWithoutExtension(outPath)}'
+            : '抽帧: ${p.basenameWithoutExtension(outPath)} ($deviceLabel)',
+      );
       await runMediaTool('ffmpeg', [
         '-nostdin',
         '-y',
