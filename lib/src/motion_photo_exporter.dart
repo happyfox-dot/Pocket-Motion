@@ -23,24 +23,36 @@ class MotionPhotoExporter {
     required MediaAsset asset,
     required String outDir,
     WatermarkSettings watermark = const WatermarkSettings(),
+    ExportOptions options = const ExportOptions(),
   }) async {
+    await options.cancelToken?.checkpoint();
     await Directory(outDir).create(recursive: true);
     final base =
         '${p.basenameWithoutExtension(asset.filename)}${watermark.outputSuffix}_MP';
-    final outPath = p.join(outDir, '$base.jpg');
-    await ensureOutputsAvailable([outPath]);
+    final desiredPath = p.join(outDir, '$base.jpg');
+    final outPath = (await resolveExportTargets(
+      [desiredPath],
+      options.conflictPolicy,
+    )).single;
+
     final staging = await Directory(outDir).createTemp('.pocket-motion-');
     final tmpJpg = p.join(staging.path, 'still.jpg');
     final pending = p.join(staging.path, 'motion.jpg');
     try {
-      final details = await VideoDetails.probe(asset.path);
-
-      final mp4Info = await MediaMetadata.extractFromMp4(asset.path);
+      final details = await VideoDetails.probe(
+        asset.path,
+        cancelToken: options.cancelToken,
+      );
+      final mp4Info =
+          details.device ?? await MediaMetadata.extractFromMp4(asset.path);
       final shotAt = asset.shotAt ?? mp4Info.creationTime;
       final mediaPath = await WatermarkRenderer.prepareVideo(
         source: asset.path,
         staging: staging,
         settings: watermark,
+        knownWidth: details.width,
+        knownHeight: details.height,
+        options: options,
         onLog: onLog,
       );
       final deviceLabel =
@@ -49,7 +61,7 @@ class MotionPhotoExporter {
           : '${mp4Info.make} ${mp4Info.model}';
 
       // 1) 抽中间帧为纯 JPEG
-      _log('抽帧: $base ($deviceLabel)');
+      _log('抽帧: ${p.basenameWithoutExtension(outPath)} ($deviceLabel)');
       await runMediaTool('ffmpeg', [
         '-nostdin',
         '-y',
@@ -64,15 +76,16 @@ class MotionPhotoExporter {
         '-update',
         '1',
         tmpJpg,
-      ]);
+      ], cancelToken: options.cancelToken);
 
+      await options.cancelToken?.checkpoint();
       try {
         // 2) 读静态 JPEG，以及原片或已加水印的 MP4。
         var jpg = await File(tmpJpg).readAsBytes();
         final mp4Length = await File(mediaPath).length();
         final dims = MediaMetadata.extractJpegDimensions(jpg);
 
-        // 3) 纯 Dart 构造 EXIF APP1 段（设备品牌/型号、拍摄时间、宽高）与 Google Motion Photo XMP APP1 段并注入 SOI 之后
+        // 3) 纯 Dart 构造 EXIF APP1 段与 Google Motion Photo XMP APP1 段并注入 SOI 之后
         final exifApp1 = MediaMetadata.buildExifApp1Segment(
           make: mp4Info.make,
           model: mp4Info.model,
@@ -111,9 +124,9 @@ class MotionPhotoExporter {
         } catch (_) {}
       }
 
-      await ensureOutputsAvailable([outPath]);
-      await File(pending).rename(outPath);
-      _log('完成: $base.jpg (Motion Photo，目标相册兼容性待验证)');
+      await options.cancelToken?.checkpoint();
+      await publishStagedFile(pending, outPath, options.conflictPolicy);
+      _log('完成: ${p.basename(outPath)} (Motion Photo)');
       return outPath;
     } finally {
       if (await staging.exists()) await staging.delete(recursive: true);

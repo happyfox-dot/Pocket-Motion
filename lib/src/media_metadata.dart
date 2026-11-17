@@ -17,6 +17,23 @@ class Mp4DeviceInfo {
   });
 }
 
+/// 从源 MP4 单次扫描同时读取的视频时长、尺寸与设备元数据
+class Mp4ProbeResult {
+  final double duration;
+  final double coverTime;
+  final int width;
+  final int height;
+  final Mp4DeviceInfo device;
+
+  const Mp4ProbeResult({
+    required this.duration,
+    required this.coverTime,
+    required this.width,
+    required this.height,
+    required this.device,
+  });
+}
+
 /// 视频轨时间基与帧时长信息
 class _VideoTrackTiming {
   final int trackId;
@@ -117,6 +134,171 @@ class MediaMetadata {
       creationTime: creationTime,
       gpsIso6709: gps,
     );
+  }
+
+  /// 纯 Dart 零进程开销探测 MP4/MOV 视频轨时长、宽高与设备信息；若非标准 moov 则返回 null 交由 ffprobe 兜底。
+  static Future<Mp4ProbeResult?> tryProbeVideoFile(String mp4Path) async {
+    try {
+      final f = File(mp4Path);
+      if (!await f.exists()) return null;
+      final raf = await f.open();
+      try {
+        final fileLen = await raf.length();
+        if (fileLen < 16) return null;
+        Uint8List? moovBytes;
+        int pos = 0;
+        while (pos + 8 <= fileLen) {
+          await raf.setPosition(pos);
+          final hdr = await raf.read(16);
+          if (hdr.length < 8) break;
+          final bd = ByteData.sublistView(hdr);
+          int sz = bd.getUint32(0);
+          final typ = ascii.decode(hdr.sublist(4, 8), allowInvalid: true);
+          int hdrLen = 8;
+          if (sz == 1 && hdr.length >= 16) {
+            sz = bd.getUint64(8);
+            hdrLen = 16;
+          } else if (sz == 0) {
+            sz = fileLen - pos;
+          }
+          if (sz < hdrLen || pos + sz > fileLen) break;
+          if (typ == 'moov' && sz - hdrLen <= 32 * 1024 * 1024) {
+            await raf.setPosition(pos + hdrLen);
+            moovBytes = await raf.read(sz - hdrLen);
+            break;
+          }
+          pos += sz;
+        }
+        if (moovBytes == null) return null;
+
+        // 解析视频轨宽高、时长及全局 mvhd 时长
+        final timing = _inspectMoovForStillImageTrack(moovBytes);
+        final vt = timing.videoTiming;
+        if (vt == null) return null;
+
+        double? durationSec;
+        if (vt.videoTimescale > 0 && vt.videoDuration > 0) {
+          durationSec = vt.videoDuration / vt.videoTimescale;
+        } else if (timing.movieTimescale > 0 && timing.movieDuration > 0) {
+          durationSec = timing.movieDuration / timing.movieTimescale;
+        }
+        if (durationSec == null || !durationSec.isFinite || durationSec <= 0) {
+          return null;
+        }
+
+        final dims = _extractVideoDimensionsFromMoov(moovBytes);
+        if (dims == null || dims.$1 < 4 || dims.$2 < 4) return null;
+
+        final parsed = _parseMoovMetadata(moovBytes);
+        String? make = parsed.make.isNotEmpty ? parsed.make : null;
+        String? model = parsed.model.isNotEmpty ? parsed.model : null;
+
+        if (model == null || model.isEmpty) {
+          await raf.setPosition(0);
+          final headLen = fileLen < 256 * 1024 ? fileLen : 256 * 1024;
+          final head = await raf.read(headLen);
+          final text = latin1.decode(head, allowInvalid: true);
+          final djiMatch = RegExp(
+            r'(DJI\s*Osmo\s*Pocket\s*[0-9A-Za-z]+|OsmoPocket[0-9A-Za-z]+|DJI\s*[A-Za-z0-9_-]{3,20})',
+          ).firstMatch(text);
+          if (djiMatch != null) {
+            final raw = djiMatch.group(0)!.trim();
+            if (!raw.startsWith('DJI_20') && !raw.contains('TPLG')) {
+              model = raw.startsWith('DJI') ? raw : 'DJI $raw';
+              make ??= 'DJI';
+            }
+          }
+        }
+
+        final cover = durationSec >= 3 ? 1.5 : durationSec / 2;
+        return Mp4ProbeResult(
+          duration: durationSec,
+          coverTime: cover,
+          width: dims.$1,
+          height: dims.$2,
+          device: Mp4DeviceInfo(
+            make: (make ?? '').trim(),
+            model: (model ?? '').trim(),
+            creationTime: parsed.creationTime,
+            gpsIso6709: parsed.gpsIso6709,
+          ),
+        );
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static (int, int)? _extractVideoDimensionsFromMoov(Uint8List moovBody) {
+    int pos = 0;
+    while (pos + 8 <= moovBody.length) {
+      final bd = ByteData.sublistView(moovBody, pos, pos + 8);
+      int sz = bd.getUint32(0);
+      final typ = latin1.decode(moovBody.sublist(pos + 4, pos + 8));
+      if (sz == 0) sz = moovBody.length - pos;
+      if (sz < 8 || pos + sz > moovBody.length) break;
+      if (typ == 'trak') {
+        final res = _extractTrakVideoDims(moovBody, pos + 8, pos + sz);
+        if (res != null) return res;
+      }
+      pos += sz;
+    }
+    return null;
+  }
+
+  static (int, int)? _extractTrakVideoDims(Uint8List buf, int start, int end) {
+    bool isVideo = false;
+    int stsdW = 0;
+    int stsdH = 0;
+    int tkhdW = 0;
+    int tkhdH = 0;
+
+    void walk(int s, int e) {
+      int p = s;
+      while (p + 8 <= e) {
+        final bd = ByteData.sublistView(buf, p, p + 8);
+        int sz = bd.getUint32(0);
+        final typ = latin1.decode(buf.sublist(p + 4, p + 8));
+        if (sz == 0) sz = e - p;
+        if (sz < 8 || p + sz > e) break;
+        final bs = p + 8;
+        final be = p + sz;
+
+        if (typ == 'tkhd') {
+          final ver = buf[bs];
+          final tBd = ByteData.sublistView(buf, bs, be);
+          if (ver == 1 && be - bs >= 96) {
+            tkhdW = tBd.getUint32(88) >> 16;
+            tkhdH = tBd.getUint32(92) >> 16;
+          } else if (ver == 0 && be - bs >= 84) {
+            tkhdW = tBd.getUint32(76) >> 16;
+            tkhdH = tBd.getUint32(80) >> 16;
+          }
+        } else if (typ == 'hdlr' && be - bs >= 12) {
+          if (latin1.decode(buf.sublist(bs + 8, bs + 12)) == 'vide') {
+            isVideo = true;
+          }
+        } else if (typ == 'stsd' && be - bs >= 44) {
+          final sBd = ByteData.sublistView(buf, bs, be);
+          final count = sBd.getUint32(4);
+          if (count >= 1) {
+            stsdW = sBd.getUint16(40);
+            stsdH = sBd.getUint16(42);
+          }
+        } else if (typ == 'mdia' || typ == 'minf' || typ == 'stbl') {
+          walk(bs, be);
+        }
+        p += sz;
+      }
+    }
+
+    walk(start, end);
+    if (!isVideo) return null;
+    if (stsdW > 0 && stsdH > 0) return (stsdW, stsdH);
+    if (tkhdW > 0 && tkhdH > 0) return (tkhdW, tkhdH);
+    return null;
   }
 
   static Mp4DeviceInfo _parseMoovMetadata(Uint8List moov) {
@@ -916,7 +1098,7 @@ class MediaMetadata {
     );
   }
 
-  /// 将源 MP4 转换为带完整 Apple Live Photo 元数据的 QuickTime MOV
+  /// 将源 MP4 流式转换为带完整 Apple Live Photo 元数据的 QuickTime MOV（仅将 moov 读入内存，mdat 零整块堆拷贝）
   static Future<void> writeMovLivePhotoMetadata({
     required String srcMp4Path,
     required String outMovPath,
@@ -926,145 +1108,167 @@ class MediaMetadata {
     DateTime? shotAt,
     double coverTimeSeconds = 1.5,
   }) async {
-    final bytes = await File(srcMp4Path).readAsBytes();
+    final srcFile = File(srcMp4Path);
+    final inRaf = await srcFile.open();
+    RandomAccessFile? outRaf;
+    try {
+      final fileLen = await inRaf.length();
+      final atoms = <({int offset, int size, int hdrLen, String type})>[];
+      int moovOffset = -1;
+      int moovHdrLen = 8;
+      int moovSize = 0;
 
-    int moovOffset = -1;
-    int moovSize = 0;
-    int pos = 0;
-    while (pos + 8 <= bytes.length) {
-      final bd = ByteData.sublistView(bytes, pos, pos + 8);
-      int sz = bd.getUint32(0);
-      final typ = latin1.decode(bytes.sublist(pos + 4, pos + 8));
-      int hdrLen = 8;
-      if (sz == 1 && pos + 16 <= bytes.length) {
-        sz = ByteData.sublistView(bytes, pos + 8, pos + 16).getUint64(0);
-        hdrLen = 16;
-      } else if (sz == 0) {
-        sz = bytes.length - pos;
+      int pos = 0;
+      while (pos + 8 <= fileLen) {
+        await inRaf.setPosition(pos);
+        final hdr = await inRaf.read(16);
+        if (hdr.length < 8) break;
+        final bd = ByteData.sublistView(hdr);
+        int sz = bd.getUint32(0);
+        final typ = latin1.decode(hdr.sublist(4, 8));
+        int hdrLen = 8;
+        if (sz == 1 && hdr.length >= 16) {
+          sz = bd.getUint64(8);
+          hdrLen = 16;
+        } else if (sz == 0) {
+          sz = fileLen - pos;
+        }
+        if (sz < hdrLen || pos + sz > fileLen) break;
+        atoms.add((offset: pos, size: sz, hdrLen: hdrLen, type: typ));
+        if (typ == 'moov' && moovOffset < 0) {
+          moovOffset = pos;
+          moovHdrLen = hdrLen;
+          moovSize = sz;
+        }
+        pos += sz;
       }
-      if (sz < hdrLen || pos + sz > bytes.length) break;
-      if (typ == 'moov') {
-        moovOffset = pos;
-        moovSize = sz;
-        break;
-      }
-      pos += sz;
-    }
 
-    final qtFtyp = _wrapAtom(
-      'ftyp',
-      Uint8List.fromList([
-        0x71, 0x74, 0x20, 0x20, // 'qt  '
-        0x00, 0x00, 0x02, 0x00,
-        0x71, 0x74, 0x20, 0x20, // 'qt  '
-      ]),
-    );
-
-    if (moovOffset < 0) {
-      await File(outMovPath).writeAsBytes(bytes);
-      return;
-    }
-
-    final preMoovParts = BytesBuilder();
-    int scan = 0;
-    while (scan + 8 <= bytes.length) {
-      final bd = ByteData.sublistView(bytes, scan, scan + 8);
-      int sz = bd.getUint32(0);
-      final typ = latin1.decode(bytes.sublist(scan + 4, scan + 8));
-      int hdrLen = 8;
-      if (sz == 1 && scan + 16 <= bytes.length) {
-        sz = ByteData.sublistView(bytes, scan + 8, scan + 16).getUint64(0);
-        hdrLen = 16;
-      } else if (sz == 0) {
-        sz = bytes.length - scan;
-      }
-      if (sz < hdrLen || scan + sz > bytes.length) break;
-      if (scan == moovOffset) {
-        // skip original moov
-      } else if (typ == 'ftyp') {
-        preMoovParts.add(qtFtyp);
-      } else {
-        preMoovParts.add(bytes.sublist(scan, scan + sz));
-      }
-      scan += sz;
-    }
-
-    final preMoovBytes = preMoovParts.toBytes();
-
-    const stillMetaChunkPayload = <int>[
-      // Sample 1: 8 bytes (0xFF before cover)
-      0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
-      // Sample 2: 9 bytes (0x00 at cover frame)
-      0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x01, 0x00,
-      // Sample 3: 8 bytes (0xFF after cover)
-      0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
-    ];
-    final extraMdatAtom = _wrapAtom('mdat', Uint8List.fromList(stillMetaChunkPayload));
-    final metaChunkFileOffset = preMoovBytes.length + 8;
-
-    final moovBody = Uint8List.fromList(
-      bytes.sublist(moovOffset + 8, moovOffset + moovSize),
-    );
-
-    final qtSec = shotAt != null
-        ? (shotAt.toUtc().millisecondsSinceEpoch ~/ 1000) + _qtEpochOffset
-        : null;
-    if (qtSec != null && qtSec > 0) {
-      _patchMoovTimestamps(moovBody, 0, moovBody.length, qtSec);
-    }
-
-    final moovInfo = _inspectMoovForStillImageTrack(moovBody);
-
-    final cleanedMoovChildren = BytesBuilder();
-    int cPos = 0;
-    while (cPos + 8 <= moovBody.length) {
-      final bd = ByteData.sublistView(moovBody, cPos, cPos + 8);
-      int sz = bd.getUint32(0);
-      final typ = latin1.decode(moovBody.sublist(cPos + 4, cPos + 8));
-      if (sz == 0) sz = moovBody.length - cPos;
-      if (sz < 8 || cPos + sz > moovBody.length) break;
-      if (typ == 'mvhd') {
-        final mvhdCopy = Uint8List.fromList(moovBody.sublist(cPos, cPos + sz));
-        _bumpMvhdNextTrackId(mvhdCopy, moovInfo.newMetaTrackId + 1);
-        cleanedMoovChildren.add(mvhdCopy);
-      } else if (typ != 'meta' && typ != 'udta') {
-        cleanedMoovChildren.add(moovBody.sublist(cPos, cPos + sz));
-      }
-      cPos += sz;
-    }
-
-    if (moovInfo.videoTiming != null) {
-      final stillTrak = _buildStillImageTimeTrakAtom(
-        metaTrackId: moovInfo.newMetaTrackId,
-        videoTrackId: moovInfo.videoTiming!.trackId,
-        movieTimescale: moovInfo.movieTimescale,
-        movieDuration: moovInfo.movieDuration,
-        videoTimescale: moovInfo.videoTiming!.videoTimescale,
-        videoDuration: moovInfo.videoTiming!.videoDuration,
-        frameDelta: moovInfo.videoTiming!.frameDelta,
-        coverTimeSeconds: coverTimeSeconds,
-        metaChunkFileOffset: metaChunkFileOffset,
-        qtSec: qtSec ?? 0,
+      final qtFtyp = _wrapAtom(
+        'ftyp',
+        Uint8List.fromList([
+          0x71, 0x74, 0x20, 0x20, // 'qt  '
+          0x00, 0x00, 0x02, 0x00,
+          0x71, 0x74, 0x20, 0x20, // 'qt  '
+        ]),
       );
-      cleanedMoovChildren.add(stillTrak);
+
+      if (moovOffset < 0) {
+        await inRaf.close();
+        await srcFile.copy(outMovPath);
+        return;
+      }
+
+      int preMoovLength = 0;
+      for (final atom in atoms) {
+        if (atom.offset == moovOffset) {
+          continue;
+        } else if (atom.type == 'ftyp') {
+          preMoovLength += qtFtyp.length;
+        } else {
+          preMoovLength += atom.size;
+        }
+      }
+
+      const stillMetaChunkPayload = <int>[
+        // Sample 1: 8 bytes (0xFF before cover)
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
+        // Sample 2: 9 bytes (0x00 at cover frame)
+        0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x01, 0x00,
+        // Sample 3: 8 bytes (0xFF after cover)
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
+      ];
+      final extraMdatAtom = _wrapAtom(
+        'mdat',
+        Uint8List.fromList(stillMetaChunkPayload),
+      );
+      final metaChunkFileOffset = preMoovLength + 8;
+
+      await inRaf.setPosition(moovOffset + moovHdrLen);
+      final moovBody = await inRaf.read(moovSize - moovHdrLen);
+
+      final qtSec = shotAt != null
+          ? (shotAt.toUtc().millisecondsSinceEpoch ~/ 1000) + _qtEpochOffset
+          : null;
+      if (qtSec != null && qtSec > 0) {
+        _patchMoovTimestamps(moovBody, 0, moovBody.length, qtSec);
+      }
+
+      final moovInfo = _inspectMoovForStillImageTrack(moovBody);
+
+      final cleanedMoovChildren = BytesBuilder();
+      int cPos = 0;
+      while (cPos + 8 <= moovBody.length) {
+        final bd = ByteData.sublistView(moovBody, cPos, cPos + 8);
+        int sz = bd.getUint32(0);
+        final typ = latin1.decode(moovBody.sublist(cPos + 4, cPos + 8));
+        if (sz == 0) sz = moovBody.length - cPos;
+        if (sz < 8 || cPos + sz > moovBody.length) break;
+        if (typ == 'mvhd') {
+          final mvhdCopy = Uint8List.fromList(
+            moovBody.sublist(cPos, cPos + sz),
+          );
+          _bumpMvhdNextTrackId(mvhdCopy, moovInfo.newMetaTrackId + 1);
+          cleanedMoovChildren.add(mvhdCopy);
+        } else if (typ != 'meta' && typ != 'udta') {
+          cleanedMoovChildren.add(moovBody.sublist(cPos, cPos + sz));
+        }
+        cPos += sz;
+      }
+
+      if (moovInfo.videoTiming != null) {
+        final stillTrak = _buildStillImageTimeTrakAtom(
+          metaTrackId: moovInfo.newMetaTrackId,
+          videoTrackId: moovInfo.videoTiming!.trackId,
+          movieTimescale: moovInfo.movieTimescale,
+          movieDuration: moovInfo.movieDuration,
+          videoTimescale: moovInfo.videoTiming!.videoTimescale,
+          videoDuration: moovInfo.videoTiming!.videoDuration,
+          frameDelta: moovInfo.videoTiming!.frameDelta,
+          coverTimeSeconds: coverTimeSeconds,
+          metaChunkFileOffset: metaChunkFileOffset,
+          qtSec: qtSec ?? 0,
+        );
+        cleanedMoovChildren.add(stillTrak);
+      }
+
+      final metaAtom = _buildQtMdtaLivePhotoMetaAtom(
+        uuid: uuid,
+        make: make,
+        model: model,
+        creationDateIso: _formatIso8601WithOffset(shotAt),
+      );
+      cleanedMoovChildren.add(metaAtom);
+
+      final newMoov = _wrapAtom('moov', cleanedMoovChildren.toBytes());
+
+      outRaf = await File(outMovPath).open(mode: FileMode.write);
+      final chunkBuf = Uint8List(256 * 1024);
+      for (final atom in atoms) {
+        if (atom.offset == moovOffset) {
+          continue;
+        } else if (atom.type == 'ftyp') {
+          await outRaf.writeFrom(qtFtyp);
+        } else {
+          await inRaf.setPosition(atom.offset);
+          var remaining = atom.size;
+          while (remaining > 0) {
+            final toRead = remaining < chunkBuf.length
+                ? remaining
+                : chunkBuf.length;
+            final got = await inRaf.readInto(chunkBuf, 0, toRead);
+            if (got <= 0) break;
+            await outRaf.writeFrom(chunkBuf, 0, got);
+            remaining -= got;
+          }
+        }
+      }
+      await outRaf.writeFrom(extraMdatAtom);
+      await outRaf.writeFrom(newMoov);
+      await outRaf.flush();
+    } finally {
+      await outRaf?.close();
+      await inRaf.close();
     }
-
-    final metaAtom = _buildQtMdtaLivePhotoMetaAtom(
-      uuid: uuid,
-      make: make,
-      model: model,
-      creationDateIso: _formatIso8601WithOffset(shotAt),
-    );
-    cleanedMoovChildren.add(metaAtom);
-
-    final newMoov = _wrapAtom('moov', cleanedMoovChildren.toBytes());
-
-    final out = BytesBuilder();
-    out.add(preMoovBytes);
-    out.add(extraMdatAtom);
-    out.add(newMoov);
-
-    await File(outMovPath).writeAsBytes(out.toBytes());
   }
 
   static ({

@@ -143,10 +143,14 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
           _resolvedCache[videoPath] = cache;
           return cache;
         }
-        // 从开头抽帧，兼容不足 1.5 秒的素材，缩放到 360 宽兼顾列表与网格清晰度。
+        // 仅解首个关键帧并缩放到 360 宽，4K 视频抽帧耗时显著降低。
         final r = await Process.run(ToolPath.find('ffmpeg'), [
           '-nostdin',
+          '-v',
+          'error',
           '-y',
+          '-skip_frame',
+          'nokey',
           '-ss',
           '0',
           '-i',
