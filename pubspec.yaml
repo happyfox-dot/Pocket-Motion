@@ -1,5 +1,5 @@
 name: dji_live_gallery
-description: "Pocket Motion — DJI Osmo Pocket 3 实况照片导出工具（Apple 原生 HEIC+MOV & Google Motion Photo）"
+description: "Pocket 4P USB 导入与百度网盘实况导出工具"
 publish_to: 'none'
 version: 2.1.1+1
 
@@ -12,6 +12,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   file_picker: ^8.1.6
   path: ^1.9.0
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.7
 
 dev_dependencies:
   flutter_test:

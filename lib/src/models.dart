@@ -1,7 +1,7 @@
 /// 媒体资产类型
 enum MediaKind { livePhoto, video, photo }
 
-/// 一个媒体文件（实况是 MP4，导出时再拆成 JPG+MOV）
+/// 一个媒体文件（实况原件为 MP4，导出时生成配对资源）
 class MediaAsset {
   final String path;
   final String filename;
@@ -20,10 +20,10 @@ class MediaAsset {
   });
 
   String get kindLabel => switch (kind) {
-        MediaKind.livePhoto => '实况',
-        MediaKind.video => '视频',
-        MediaKind.photo => '照片',
-      };
+    MediaKind.livePhoto => '实况',
+    MediaKind.video => '视频',
+    MediaKind.photo => '照片',
+  };
 
   /// 友好参数：从模板串解析分辨率/帧率，如 "4K / 29.97 fps"
   String get friendlySpec {

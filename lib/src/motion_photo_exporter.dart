@@ -1,9 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:path/path.dart' as p;
+
 import 'media_metadata.dart';
 import 'models.dart';
-import 'tool_path.dart';
+import 'export_support.dart';
+import 'watermark.dart';
 
 /// Google Motion Photo 导出器。
 ///
@@ -19,74 +22,110 @@ class MotionPhotoExporter {
   Future<String> export({
     required MediaAsset asset,
     required String outDir,
+    WatermarkSettings watermark = const WatermarkSettings(),
   }) async {
     await Directory(outDir).create(recursive: true);
-    final base = asset.filename.replaceAll(RegExp(r'\.[^.]+$'), '') + 'A';
+    final base =
+        '${p.basenameWithoutExtension(asset.filename)}${watermark.outputSuffix}_MP';
     final outPath = p.join(outDir, '$base.jpg');
-    final tmpJpg = p.join(outDir, '.$base.still.jpg');
-
-    final mp4Info = await MediaMetadata.extractFromMp4(asset.path);
-    final shotAt = asset.shotAt ?? mp4Info.creationTime;
-    final deviceLabel = mp4Info.model.toUpperCase().startsWith(mp4Info.make.toUpperCase())
-        ? mp4Info.model
-        : '${mp4Info.make} ${mp4Info.model}';
-
-    // 1) 抽中间帧为纯 JPEG
-    _log('抽帧: $base ($deviceLabel)');
-    final res = await Process.run(ToolPath.find('ffmpeg'), [
-      '-y', '-ss', '1.5', '-i', asset.path,
-      '-frames:v', '1', '-q:v', '2', '-update', '1', tmpJpg,
-    ]);
-    if (res.exitCode != 0) {
-      _log('  !! ffmpeg 失败: ${res.stderr}');
-      throw Exception('ffmpeg 抽帧失败 (exit ${res.exitCode})');
-    }
-
+    await ensureOutputsAvailable([outPath]);
+    final staging = await Directory(outDir).createTemp('.pocket-motion-');
+    final tmpJpg = p.join(staging.path, 'still.jpg');
+    final pending = p.join(staging.path, 'motion.jpg');
     try {
-      // 2) 读静态 JPEG 和原 MP4
-      var jpg = await File(tmpJpg).readAsBytes();
-      final mp4 = await File(asset.path).readAsBytes();
-      final dims = MediaMetadata.extractJpegDimensions(jpg);
+      final details = await VideoDetails.probe(asset.path);
 
-      // 3) 纯 Dart 构造 EXIF APP1 段（设备品牌/型号、拍摄时间、宽高）与 Google Motion Photo XMP APP1 段并注入 SOI 之后
-      final exifApp1 = MediaMetadata.buildExifApp1Segment(
-        make: mp4Info.make,
-        model: mp4Info.model,
-        software: 'Pocket Motion',
-        shotAt: shotAt,
-        imageWidth: dims?.$1,
-        imageHeight: dims?.$2,
+      final mp4Info = await MediaMetadata.extractFromMp4(asset.path);
+      final shotAt = asset.shotAt ?? mp4Info.creationTime;
+      final mediaPath = await WatermarkRenderer.prepareVideo(
+        source: asset.path,
+        staging: staging,
+        settings: watermark,
+        onLog: onLog,
       );
-      final xmpApp1 = _buildXmpSegment(mp4Length: mp4.length);
-      jpg = MediaMetadata.injectIntoJpeg(jpg, [exifApp1, xmpApp1]);
+      final deviceLabel =
+          mp4Info.model.toUpperCase().startsWith(mp4Info.make.toUpperCase())
+          ? mp4Info.model
+          : '${mp4Info.make} ${mp4Info.model}';
 
-      // 4) 拼接：JPEG + MP4
-      final out = BytesBuilder()
-        ..add(jpg)
-        ..add(mp4);
-      await File(outPath).writeAsBytes(out.toBytes());
-    } finally {
+      // 1) 抽中间帧为纯 JPEG
+      _log('抽帧: $base ($deviceLabel)');
+      await runMediaTool('ffmpeg', [
+        '-nostdin',
+        '-y',
+        '-ss',
+        '${details.coverTime}',
+        '-i',
+        mediaPath,
+        '-frames:v',
+        '1',
+        '-q:v',
+        '2',
+        '-update',
+        '1',
+        tmpJpg,
+      ]);
+
       try {
-        if (File(tmpJpg).existsSync()) {
-          File(tmpJpg).deleteSync();
+        // 2) 读静态 JPEG，以及原片或已加水印的 MP4。
+        var jpg = await File(tmpJpg).readAsBytes();
+        final mp4Length = await File(mediaPath).length();
+        final dims = MediaMetadata.extractJpegDimensions(jpg);
+
+        // 3) 纯 Dart 构造 EXIF APP1 段（设备品牌/型号、拍摄时间、宽高）与 Google Motion Photo XMP APP1 段并注入 SOI 之后
+        final exifApp1 = MediaMetadata.buildExifApp1Segment(
+          make: mp4Info.make,
+          model: mp4Info.model,
+          software: 'Pocket Motion',
+          shotAt: shotAt,
+          imageWidth: dims?.$1,
+          imageHeight: dims?.$2,
+        );
+        final xmpApp1 = _buildXmpSegment(
+          mp4Length: mp4Length,
+          presentationUs: (details.coverTime * 1000000).round(),
+        );
+        jpg = MediaMetadata.injectIntoJpeg(jpg, [exifApp1, xmpApp1]);
+
+        // 4) 拼接：JPEG + MP4
+        final out = File(pending).openWrite();
+        try {
+          out.add(jpg);
+          await out.addStream(File(mediaPath).openRead());
+          await out.flush();
+        } finally {
+          await out.close();
         }
-      } catch (_) {}
-    }
+      } finally {
+        try {
+          if (File(tmpJpg).existsSync()) {
+            File(tmpJpg).deleteSync();
+          }
+        } catch (_) {}
+      }
 
-    // 5) 文件系统时间归位
-    if (shotAt != null) {
-      try {
-        await File(outPath).setLastModified(shotAt);
-      } catch (_) {}
-    }
+      // 5) 文件系统时间归位
+      if (shotAt != null) {
+        try {
+          await File(pending).setLastModified(shotAt);
+        } catch (_) {}
+      }
 
-    _log('完成: $base.jpg (Motion Photo)');
-    return outPath;
+      await ensureOutputsAvailable([outPath]);
+      await File(pending).rename(outPath);
+      _log('完成: $base.jpg (Motion Photo，目标相册兼容性待验证)');
+      return outPath;
+    } finally {
+      if (await staging.exists()) await staging.delete(recursive: true);
+    }
   }
 
-  Uint8List _buildXmpSegment({required int mp4Length}) {
-    const presentationUs = 1500000;
-    final xml = '''<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Pocket Motion">
+  Uint8List _buildXmpSegment({
+    required int mp4Length,
+    required int presentationUs,
+  }) {
+    final xml =
+        '''<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Pocket Motion">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"
@@ -117,8 +156,7 @@ class MotionPhotoExporter {
 </x:xmpmeta>''';
 
     final prefix = 'http://ns.adobe.com/xap/1.0/\x00';
-    final content = Uint8List.fromList(
-        [...prefix.codeUnits, ...xml.codeUnits]);
+    final content = Uint8List.fromList([...prefix.codeUnits, ...xml.codeUnits]);
     final segLen = content.length + 2;
     final b = BytesBuilder()
       ..add([0xFF, 0xE1])
