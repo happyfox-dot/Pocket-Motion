@@ -42,7 +42,8 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $zipPath)) {
 }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 # Copy only runtime binaries and Flutter data, never local samples or settings.
-Get-ChildItem -LiteralPath $sourceDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') } |
+Get-ChildItem -LiteralPath $sourceDir -File |
+    Where-Object { $_.Extension -in @('.exe', '.dll') -or $_.Name -eq 'native_assets.json' } |
     Copy-Item -Destination $stage
 Copy-Item -LiteralPath (Join-Path $sourceDir 'data') -Destination $stage -Recurse
 Get-ChildItem -LiteralPath $CrtDirectory -Filter '*.dll' -File | Copy-Item -Destination $stage
@@ -70,7 +71,7 @@ $metadata = [ordered]@{
     source_commit = $commit
     repository = 'https://github.com/happyfox-dot/Pocket-Motion'
     platform = 'windows-x64'
-    built_at_utc = [DateTime]::UtcNow.ToString('o')
+    packaged_at_utc = [DateTime]::UtcNow.ToString('o')
 }
 [IO.File]::WriteAllText((Join-Path $stage 'BUILD_INFO.json'), ($metadata | ConvertTo-Json), $utf8)
 $fileHashes = Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName | ForEach-Object {
