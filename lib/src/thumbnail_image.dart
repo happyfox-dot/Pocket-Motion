@@ -1,6 +1,10 @@
 import 'dart:io';
+
+// Keep the upstream Flutter 3.47 API while also building on newer SDKs.
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+
 import 'tool_path.dart';
 
 /// 懒加载缩略图：首次构建时用 ffmpeg 从 MP4 抽一帧，缓存到临时目录。
@@ -37,25 +41,55 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
   }
 
   Future<void> _ensureThumb() async {
-    final dir = await _cacheDir();
-    // 用文件名做缓存键（兼容 Windows 反斜杠路径）
-    final key = p.basename(widget.videoPath).replaceAll('.', '_');
-    final cache = p.join(dir, '$key.jpg');
-    final f = File(cache);
-    if (await f.exists()) {
-      setState(() { _cachePath = cache; _loading = false; });
-      return;
-    }
-    // ffmpeg 抽 1.5s 处、缩放到 320 宽
-    final r = await Process.run(ToolPath.find('ffmpeg'), [
-      '-y', '-ss', '1.5', '-i', widget.videoPath,
-      '-frames:v', '1', '-vf', 'scale=320:-1',
-      '-q:v', '5', '-update', '1', cache,
-    ]);
-    if (r.exitCode == 0 && await f.exists()) {
-      setState(() { _cachePath = cache; _loading = false; });
-    } else {
-      setState(() => _loading = false);
+    try {
+      final dir = await _cacheDir();
+      final stat = await File(widget.videoPath).stat();
+      final key = Object.hash(
+        widget.videoPath,
+        stat.size,
+        stat.modified,
+      ).toUnsigned(32).toRadixString(16);
+      final cache = p.join(dir, '$key.jpg');
+      final f = File(cache);
+      if (await f.exists()) {
+        if (mounted) {
+          setState(() {
+            _cachePath = cache;
+            _loading = false;
+          });
+        }
+        return;
+      }
+      // 从开头抽帧，兼容不足 1.5 秒的素材，缩放到 320 宽。
+      final r = await Process.run(ToolPath.find('ffmpeg'), [
+        '-nostdin',
+        '-y',
+        '-ss',
+        '0',
+        '-i',
+        widget.videoPath,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=320:-1',
+        '-q:v',
+        '5',
+        '-update',
+        '1',
+        cache,
+      ]);
+      if (r.exitCode == 0 && await f.exists()) {
+        if (mounted) {
+          setState(() {
+            _cachePath = cache;
+            _loading = false;
+          });
+        }
+      } else {
+        if (mounted) setState(() => _loading = false);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -74,24 +108,33 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
           child: _loading
               ? const Center(
                   child: SizedBox(
-                    width: 14, height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2)))
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
               : _cachePath != null
-                  ? Image.file(File(_cachePath!), fit: BoxFit.cover)
-                  : const Icon(Icons.movie, color: Colors.grey),
+              ? Image.file(File(_cachePath!), fit: BoxFit.cover)
+              : const Icon(Icons.movie, color: Colors.grey),
         ),
         if (widget.isLive)
           Positioned(
-            right: 0, bottom: 0,
+            right: 0,
+            bottom: 0,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
               decoration: BoxDecoration(
                 color: Colors.teal,
-                borderRadius: BorderRadius.circular(3)),
-              child: const Text('LIVE',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 8, fontWeight: FontWeight.bold)),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: const Text(
+                'LIVE',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 8,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
           ),
       ],

@@ -48,3 +48,9 @@ app.*.map.json
 .widget_preview/
 macos/Pods/
 macos/Runner/GeneratedPlugin
+
+# Local SDK, exports and private camera samples
+/.tools/
+/dist/
+/samples/
+/exports/

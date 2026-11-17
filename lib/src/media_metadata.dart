@@ -106,10 +106,10 @@ class MediaMetadata {
       }
     } catch (_) {}
 
-    final finalMake = (make != null && make.trim().isNotEmpty) ? make.trim() : 'DJI';
+    final finalMake = (make != null && make.trim().isNotEmpty) ? make.trim() : '';
     final finalModel = (model != null && model.trim().isNotEmpty)
         ? model.trim()
-        : 'DJI OsmoPocket4P';
+        : '';
 
     return Mp4DeviceInfo(
       make: finalMake,
@@ -659,7 +659,12 @@ class MediaMetadata {
     }
 
     walkRoot(0, b.length);
-    if (bestHvcc == null || bestSize <= 1024 || bestOffset + bestSize > b.length) {
+    // Flat/dark frames can legitimately compress to less than 1 KiB.
+    if (bestHvcc == null ||
+        bestSize <= 0 ||
+        bestWidth <= 0 ||
+        bestHeight <= 0 ||
+        bestOffset + bestSize > b.length) {
       throw StateError('无法从临时 HEVC 帧文件中提取有效的 hvcC 或图像码流 (size=$bestSize)');
     }
     return (
@@ -906,7 +911,7 @@ class MediaMetadata {
       jpegBytes,
       [
         exifApp1Segment,
-        if (xmpApp1Segment != null) xmpApp1Segment,
+        ?xmpApp1Segment,
       ],
     );
   }
