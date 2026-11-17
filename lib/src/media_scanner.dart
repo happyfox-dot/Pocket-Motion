@@ -16,11 +16,11 @@ class MediaScanner {
     void Function(String)? onWarning,
   }) async {
     if (dirPath.trim().isEmpty) {
-      throw const FileSystemException('请先选择素材目录或查找 USB 相机');
+      throw const FileSystemException('请先选择本地素材文件夹或查找 USB 相机');
     }
     var dir = Directory(dirPath);
     if (!await dir.exists()) {
-      throw FileSystemException('素材目录不存在，请连接相机并选择文件传输模式', dirPath);
+      throw FileSystemException('素材目录不存在，请重新选择文件夹；若为相机存储，请检查连接', dirPath);
     }
     // Accept the disk root, DCIM itself, or an individual DJI folder.
     final dcim = Directory(p.join(dir.path, 'DCIM'));

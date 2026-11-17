@@ -1,7 +1,7 @@
 name: dji_live_gallery
 description: "Pocket 4P USB 导入与百度网盘实况导出工具"
 publish_to: 'none'
-version: 2.1.1+1
+version: 2.2.0+2
 
 environment:
   sdk: ^3.13.0
@@ -23,3 +23,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/watermarks/pocket4p_device.png

@@ -1,0 +1,15 @@
+Pocket Motion — Windows 64 位便携版
+
+1. 完整解压 ZIP。不要在压缩包预览窗口内启动。
+2. 双击 PocketMotion.exe。保留所有 DLL 和 data 文件夹。
+3. 点击“选择本地素材文件夹”，或连接相机并选择文件传输模式后查找 USB 相机。
+4. 只有带实况标记的视频会进入“实况”分类；普通视频可预览和复制。
+5. 选择电脑上的导出目录、勾选素材，需要时开启机型水印，再选择导出格式。
+
+百度网盘使用：上传 baidu_live 文件夹中的 .livp 原文件，在手机百度网盘 App 中保存到相册。
+本版本已验证本地生成与文件结构；iPhone、小米、vivo、OPPO 经网盘保存后的表现仍需真机确认。
+
+水印使用 Mimo 中的 Pocket 4P 原始字标图片；整体尺寸与边距尚未和 Mimo 实际成片逐像素校准。
+完整说明见 README.md，组件说明见 THIRD_PARTY_NOTICES.md，版本信息见 BUILD_INFO.json。
+
+无需安装 Flutter、Dart 或单独配置 FFmpeg。此包适用于 Windows 10/11 x64。
