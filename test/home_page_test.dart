@@ -91,6 +91,12 @@ void main() {
     await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
     expect(find.text('通过百度网盘向 Apple 用户交付实况照片指南'), findsNothing);
+
+    // Open the built-in Live Photo & Video player menu.
+    await tester.tap(find.text('实况播放器'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('打开本地实况 / 视频文件'), findsOneWidget);
+    expect(find.textContaining('播放已导出目录成果'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
