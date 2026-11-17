@@ -1,6 +1,7 @@
 // Keep the upstream Flutter 3.47 API while also building on newer SDKs.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:dji_live_gallery/main.dart';
 
@@ -38,6 +39,58 @@ void main() {
     await tester.ensureVisible(log);
     await tester.pumpAndSettle();
     expect(log.hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('Baidu Netdisk Apple guide opens, copies tip, and view mode switches', (
+    tester,
+  ) async {
+    String? copiedText;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copiedText = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const DjiLiveApp());
+    await tester.pump();
+
+    // Switch between list and grid view modes cleanly.
+    await tester.tap(find.byTooltip('网格视图'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('列表视图'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Open the Baidu Netdisk -> Apple Live Photo delivery guide.
+    await tester.tap(find.text('网盘交付指南'));
+    await tester.pumpAndSettle();
+    expect(find.text('通过百度网盘向 Apple 用户交付实况照片指南'), findsOneWidget);
+
+    await tester.tap(find.text('复制接收方操作说明'));
+    await tester.pumpAndSettle();
+    expect(copiedText, contains('百度网盘 App'));
+    expect(copiedText, contains('.livp'));
+
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.text('通过百度网盘向 Apple 用户交付实况照片指南'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
