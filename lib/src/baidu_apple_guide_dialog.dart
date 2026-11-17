@@ -65,7 +65,7 @@ class BaiduAppleGuideDialog extends StatelessWidget {
                         ),
                         SizedBox(height: 2),
                         Text(
-                          '真 UUID 配对封装 · 支持网盘在线预览与存入 iPhone / 安卓系统相册',
+                          '真 UUID 配对封装 · 支持网盘在线预览与存入 iPhone / Android 系统相册',
                           style: TextStyle(
                             fontSize: 12,
                             color: Color(0xFF0F766E),
@@ -95,7 +95,7 @@ class BaiduAppleGuideDialog extends StatelessWidget {
                       items: const [
                         '本工具生成的 .livp 内部已写入真 iOS 配对元数据（HEIC MakerNote 0x0011 与 MOV content.identifier 同 UUID + still-image-time 快门轨），外层附带百度 1000LIVP 尾注索引。',
                         '直接将 baidu_live 内的 .livp 原文件上传百度网盘并分享；切勿在外层再套 .zip / .7z 压缩包。',
-                        '新版百度网盘已同时支持 iOS 与主流安卓跨系统实况下载（下载时可选「实况格式」），同一份 .livp 可兼顾多端接收。',
+                        '新版百度网盘已同时支持 iOS 与主流 Android 跨系统实况下载（下载时可选「实况格式」），同一份 .livp 可兼顾多端接收。',
                       ],
                     ),
                     const SizedBox(height: 14),

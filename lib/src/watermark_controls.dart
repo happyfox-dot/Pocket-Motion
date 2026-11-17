@@ -188,7 +188,7 @@ class WatermarkControls extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.only(bottom: 6),
                 child: Text(
-                  '封面与动态画面同步叠印，另存新文件名，不改动原片。',
+                  '封面与动态画面同步叠印，另存新文件，不修改源文件。',
                   style: TextStyle(
                     fontSize: 10.5,
                     height: 1.35,

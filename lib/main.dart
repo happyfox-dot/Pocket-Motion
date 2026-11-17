@@ -385,7 +385,7 @@ class _HomePageState extends State<HomePage> {
       });
       await _refreshExportedIndex();
       _log(
-        '扫描完成：${list.length} 项，实况 ${_liveAssets.length} 项（耗时 ${(sw.elapsedMilliseconds / 1000).toStringAsFixed(2)}s）',
+        '扫描完成：${list.length} 项，实况 ${_liveAssets.length} 项（耗时 ${(sw.elapsedMilliseconds / 1000).toStringAsFixed(2)} 秒）',
       );
     } catch (e) {
       if (mounted) setState(() => _assets = []);
@@ -410,7 +410,7 @@ class _HomePageState extends State<HomePage> {
       final sources = await CameraDiscovery().find();
       if (!mounted) return;
       if (sources.isEmpty) {
-        _log('没有找到相机存储。请用数据线连接，选择文件传输／U盘模式；也可手动选择素材文件夹。');
+        _log('没有找到相机存储。请用数据线连接，选择文件传输 / U 盘模式；也可手动选择素材文件夹。');
         return;
       }
       final chosen = sources.length == 1
@@ -456,7 +456,7 @@ class _HomePageState extends State<HomePage> {
         _outDir,
       ]);
     } catch (e) {
-      _log('无法打开导出文件夹：$e');
+      _log('无法打开导出目录：$e');
     }
   }
 
@@ -542,7 +542,7 @@ class _HomePageState extends State<HomePage> {
     if (exported.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('当前导出目录中还没有可播放的实况或视频成果'),
+          content: Text('当前导出目录中暂无可播放的实况或视频文件'),
           duration: Duration(seconds: 2),
         ),
       );
@@ -736,7 +736,7 @@ class _HomePageState extends State<HomePage> {
         } catch (e) {
           if (token.isCancelled) break;
           _fail++;
-          _log('失败: ${item.filename} ($e)');
+          _log('失败：${item.filename} ($e)');
         } finally {
           if (mounted) {
             setState(() {
@@ -757,10 +757,10 @@ class _HomePageState extends State<HomePage> {
     final cancelled = token.isCancelled;
     final sec = (sw.elapsedMilliseconds / 1000).toStringAsFixed(1);
     if (cancelled) {
-      _log('已取消导出：已完成 $_success，跳过 $_skipped，失败 $_fail（用时 ${sec}s）');
+      _log('已取消导出：成功 $_success，跳过 $_skipped，失败 $_fail（耗时 $sec 秒）');
     } else {
       _log(
-        '完成：成功 $_success，跳过 $_skipped，失败 $_fail（${actualWorkers}x 并发，用时 ${sec}s）',
+        '完成：成功 $_success，跳过 $_skipped，失败 $_fail（${actualWorkers}x 并发，耗时 $sec 秒）',
       );
     }
 
@@ -852,7 +852,7 @@ class _HomePageState extends State<HomePage> {
       options.conflictPolicy,
     )).single;
 
-    _log('导出: ${asset.filename} -> $folderLabel/');
+    _log('导出：${asset.filename} -> $folderLabel/');
     final staging = await Directory(targetDir).createTemp('.pocket-copy-');
     final pending = p.join(staging.path, asset.filename);
     try {
@@ -881,7 +881,7 @@ class _HomePageState extends State<HomePage> {
         } catch (_) {}
       }
       await publishStagedFile(pending, destPath, options.conflictPolicy);
-      _log('完成: $folderLabel/${p.basename(destPath)}');
+      _log('完成：$folderLabel/${p.basename(destPath)}');
     } finally {
       if (await staging.exists()) await staging.delete(recursive: true);
     }
@@ -1070,16 +1070,19 @@ class _HomePageState extends State<HomePage> {
                     ),
                     onPressed: _exporting ? null : _playExportedOutputs,
                     icon: const Icon(Icons.play_circle_outline, size: 14),
-                    label: const Text('播放成品', style: TextStyle(fontSize: 11.5)),
+                    label: const Text('播放已导出', style: TextStyle(fontSize: 11.5)),
                   ),
-                TextButton.icon(
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                Tooltip(
+                  message: '打开导出目录',
+                  child: TextButton.icon(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                    ),
+                    onPressed: _exporting ? null : _openOutput,
+                    icon: const Icon(Icons.open_in_new_rounded, size: 14),
+                    label: const Text('打开目录', style: TextStyle(fontSize: 11.5)),
                   ),
-                  onPressed: _exporting ? null : _openOutput,
-                  icon: const Icon(Icons.open_in_new_rounded, size: 14),
-                  label: const Text('打开导出文件夹', style: TextStyle(fontSize: 11.5)),
                 ),
               ],
             ),
@@ -1196,7 +1199,7 @@ class _HomePageState extends State<HomePage> {
                             ),
                             onPressed: _playExportedOutputs,
                             child: const Text(
-                              '播放验收',
+                              '播放已导出',
                               style: TextStyle(fontSize: 11.5),
                             ),
                           ),
@@ -1208,11 +1211,11 @@ class _HomePageState extends State<HomePage> {
                 Text(
                   switch (_filter) {
                     MediaKind.livePhoto =>
-                      '网盘发给 iPhone / 安卓存相册选 .livp；Mac 照片导入或隔空投送选 Apple 实况。',
+                      '网盘发给 iPhone / Android 存相册选 .livp；Mac 照片导入或隔空投送选 Apple 实况。',
                     MediaKind.video =>
-                      '未识别到实况标记的视频将原样复制至 movie 目录，不修改原片。',
+                      '未识别到实况标记的视频将原样复制至 movie 目录，不修改源文件。',
                     MediaKind.photo =>
-                      '照片将原样复制至 photo 目录并保留拍摄时间，不修改原片。',
+                      '照片将原样复制至 photo 目录并保留拍摄时间，不修改源文件。',
                   },
                   style: const TextStyle(
                     fontSize: 11,
@@ -1398,7 +1401,7 @@ class _HomePageState extends State<HomePage> {
                 style: OutlinedButton.styleFrom(shape: buttonShape),
                 onPressed: disabled ? null : _exportApple,
                 child: const Text(
-                  '导出为 Apple 实况照片',
+                  '导出 Apple 实况 (.HEIC + .MOV)',
                   style: TextStyle(fontSize: 12.5),
                 ),
               ),
@@ -1410,7 +1413,7 @@ class _HomePageState extends State<HomePage> {
                 style: OutlinedButton.styleFrom(shape: buttonShape),
                 onPressed: disabled ? null : _exportMotion,
                 child: const Text(
-                  '导出 Android 动态照片（试验）',
+                  '导出 Android 动态照片 (.jpg)',
                   style: TextStyle(fontSize: 12.5),
                 ),
               ),
@@ -1565,8 +1568,8 @@ class _HomePageState extends State<HomePage> {
                         Flexible(
                           child: Text(
                             _totalExportedFilesCount > 0
-                                ? '播放已导出目录成果 ($_totalExportedFilesCount)'
-                                : '播放已导出目录成果',
+                                ? '播放已导出文件 ($_totalExportedFilesCount)'
+                                : '播放已导出文件',
                           ),
                         ),
                       ],
@@ -2679,8 +2682,9 @@ class _PathCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final empty = path.isEmpty;
+    final emptyLabel = isOut ? '尚未选择导出目录' : '尚未选择素材目录';
     final name = empty
-        ? '尚未选择素材目录'
+        ? emptyLabel
         : path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).lastOrNull ??
               path;
     return Container(
@@ -2704,7 +2708,7 @@ class _PathCard extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Tooltip(
-              message: empty ? '尚未选择目录' : path,
+              message: empty ? emptyLabel : path,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
