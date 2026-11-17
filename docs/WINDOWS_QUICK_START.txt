@@ -1,15 +1,21 @@
-Pocket Motion — Windows 64 位便携版
+Pocket Motion — Windows 64 位免安装便携版
 
-1. 完整解压 ZIP。不要在压缩包预览窗口内启动。
-2. 双击 PocketMotion.exe。保留所有 DLL 和 data 文件夹。
-3. 点击“选择本地素材文件夹”，或连接相机并选择文件传输模式后查找 USB 相机。
-4. 只有带实况标记的视频会进入“实况”分类；普通视频可预览和复制。
-5. 选择电脑上的导出目录、勾选素材，需要时开启机型水印，再选择导出格式。
+【快速启动】
+1. 请先将整个 ZIP 压缩包完整解压到本地文件夹（切勿在压缩包预览窗口内直接双击运行）。
+2. 双击运行 PocketMotion.exe（请保留同级所有 .dll、ffmpeg.exe、ffprobe.exe 和 data 文件夹）。
 
-百度网盘使用：上传 baidu_live 文件夹中的 .livp 原文件，在手机百度网盘 App 中保存到相册。
-本版本已验证本地生成与文件结构；iPhone、小米、vivo、OPPO 经网盘保存后的表现仍需真机确认。
+【3 步导出实况照片】
+1. 导入素材：连接相机选“文件传输 / U 盘模式”后点“查找 USB 相机 / 存储卡”，或点“选择本地素材文件夹”。
+2. 预览与选片：点击卡片或左下角“LIVE 播放”可直接有声播放实况与视频；勾选要导出的素材（按住 Shift 可连选，也可点“仅选未导出”）。
+3. 选择格式导出：
+   - 发百度网盘给 iPhone / iPad / Android 手机保存相册 -> 点击“导出百度网盘实况 (.livp)”
+   - Mac 电脑“照片”App 导入或隔空投送 (AirDrop) -> 点击“导出 Apple 实况 (.HEIC + .MOV)”
+   - Android 单文件动态照片（试验） -> 点击“导出 Android 动态照片 (.jpg)”
 
-水印使用 Mimo 中的 Pocket 4P 原始字标图片；整体尺寸与边距尚未和 Mimo 实际成片逐像素校准。
-完整说明见 README.md，组件说明见 THIRD_PARTY_NOTICES.md，版本信息见 BUILD_INFO.json。
+【百度网盘交付 iPhone 要点】
+- 将导出目录 baidu_live 内的 .livp 原文件直接上传百度网盘（切勿在外层再套 .zip 压缩包）。
+- 接收方在 iPhone“百度网盘 App”转存后点开 .livp -> 点“查看原图” -> 点“下载”（选实况格式）。
+- 因保留了相机原始拍摄时间，请在系统“照片”App 的“最近保存”或“媒体类型 -> 实况照片”中查看并长按播放。
+- 软件右上角点“网盘交付指南”可一键复制发给接收方的操作说明；点“实况播放器”可直接在电脑上打开并播放 .livp 文件验收效果。
 
-无需安装 Flutter、Dart 或单独配置 FFmpeg。此包适用于 Windows 10/11 x64。
+更多常见问题与详细说明见同目录 README.md，第三方组件声明见 THIRD_PARTY_NOTICES.md，构建信息见 BUILD_INFO.json。
