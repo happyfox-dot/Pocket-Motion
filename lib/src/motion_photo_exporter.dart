@@ -63,8 +63,8 @@ class MotionPhotoExporter {
       // 1) 抽中间帧为纯 JPEG
       _log(
         deviceLabel.isEmpty
-            ? '抽帧: ${p.basenameWithoutExtension(outPath)}'
-            : '抽帧: ${p.basenameWithoutExtension(outPath)} ($deviceLabel)',
+            ? '抽帧：${p.basenameWithoutExtension(outPath)}'
+            : '抽帧：${p.basenameWithoutExtension(outPath)} ($deviceLabel)',
       );
       await runMediaTool('ffmpeg', [
         '-nostdin',
@@ -130,7 +130,7 @@ class MotionPhotoExporter {
 
       await options.cancelToken?.checkpoint();
       await publishStagedFile(pending, outPath, options.conflictPolicy);
-      _log('完成: ${p.basename(outPath)} (Motion Photo)');
+      _log('完成：${p.basename(outPath)} (Motion Photo)');
       return outPath;
     } finally {
       if (await staging.exists()) await staging.delete(recursive: true);

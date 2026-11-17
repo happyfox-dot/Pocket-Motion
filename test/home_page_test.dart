@@ -24,7 +24,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('导出视频'), findsOneWidget);
     expect(find.text('导出百度网盘实况 (.livp)'), findsNothing);
-    expect(find.text('导出为 Apple 实况照片'), findsNothing);
+    expect(find.text('导出 Apple 实况 (.HEIC + .MOV)'), findsNothing);
     expect(find.text('添加机型水印'), findsNothing);
     await tester.tap(find.widgetWithText(ChoiceChip, '实况'));
     await tester.pumpAndSettle();
@@ -96,7 +96,7 @@ void main() {
     await tester.tap(find.text('实况播放器'));
     await tester.pumpAndSettle();
     expect(find.textContaining('打开本地实况 / 视频文件'), findsOneWidget);
-    expect(find.textContaining('播放已导出目录成果'), findsOneWidget);
+    expect(find.textContaining('播放已导出文件'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });

@@ -11,7 +11,7 @@ class ExportSkipped implements Exception {
   final String path;
   const ExportSkipped(this.path);
   @override
-  String toString() => '已存在，保留原文件：${p.basename(path)}';
+  String toString() => '已存在，跳过已有文件：${p.basename(path)}';
 }
 
 class ExportCancelled implements Exception {
@@ -186,7 +186,7 @@ Future<void> publishStagedFile(
 /// Resolve the nearest existing parent before creating anything at the target.
 Future<void> validateExportLocation(String source, String destination) async {
   if (source.trim().isEmpty || destination.trim().isEmpty) {
-    throw const FileSystemException('请先选择素材目录和导出位置');
+    throw const FileSystemException('请先选择素材目录和导出目录');
   }
   final sourcePath = await Directory(source).resolveSymbolicLinks();
   final target = p.normalize(p.absolute(destination));
@@ -194,7 +194,7 @@ Future<void> validateExportLocation(String source, String destination) async {
   while (!await ancestor.exists()) {
     final parent = ancestor.parent;
     if (parent.path == ancestor.path) {
-      throw const FileSystemException('导出位置不可用');
+      throw const FileSystemException('导出目录不可用');
     }
     ancestor = parent;
   }
@@ -205,7 +205,7 @@ Future<void> validateExportLocation(String source, String destination) async {
     ),
   );
   if (p.equals(sourcePath, resolved) || p.isWithin(sourcePath, resolved)) {
-    throw const FileSystemException('请选择素材目录以外的导出位置，避免写入相机原件目录');
+    throw const FileSystemException('请选择素材目录以外的导出目录，避免写入源文件目录');
   }
 }
 

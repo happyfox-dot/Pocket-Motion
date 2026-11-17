@@ -167,7 +167,7 @@ class ExportSettingsPanel extends StatelessWidget {
                 label: '导完打开目录',
                 selected: settings.openFolderWhenDone,
                 enabled: !locked,
-                tooltip: '批量导出完成后自动打开输出文件夹',
+                tooltip: '批量导出完成后自动打开导出目录',
                 onTap: () => onChanged(
                   settings.copyWith(
                     openFolderWhenDone: !settings.openFolderWhenDone,
@@ -334,12 +334,12 @@ class ActiveExportControlCard extends StatelessWidget {
 
   String _etaText() {
     if (doneCount <= 0 || totalCount <= doneCount || elapsed.inSeconds < 1) {
-      return '计算剩余时间…';
+      return '正在估算剩余时间…';
     }
     final avgMs = elapsed.inMilliseconds / doneCount;
     final remSec = ((totalCount - doneCount) * avgMs / 1000).round();
-    if (remSec < 60) return '预计剩余 ~${remSec}s';
-    return '预计剩余 ~${remSec ~/ 60}m ${remSec % 60}s';
+    if (remSec < 60) return '预计剩余约 $remSec 秒';
+    return '预计剩余约 ${remSec ~/ 60} 分 ${remSec % 60} 秒';
   }
 
   @override
@@ -364,7 +364,7 @@ class ActiveExportControlCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   cancelling
-                      ? '正在中止导出任务…'
+                      ? '正在取消导出任务…'
                       : paused
                       ? '已暂停 ($doneCount/$totalCount · $pct%)'
                       : '正在导出 $doneCount/$totalCount ($pct% · ${workerCount}x 并发)',
