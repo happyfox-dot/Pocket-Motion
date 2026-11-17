@@ -162,7 +162,14 @@ class _HomePageState extends State<HomePage> {
     try {
       final list = await _scanner.scan(_cameraDir, onWarning: _log);
       if (!mounted) return;
-      setState(() => _assets = list);
+      setState(() {
+        _assets = list;
+        if (list.isNotEmpty && !list.any((a) => a.kind == _filter)) {
+          _filter = MediaKind.values.firstWhere(
+            (kind) => list.any((a) => a.kind == kind),
+          );
+        }
+      });
       _log('扫描完成：${list.length} 项，实况 ${_liveAssets.length} 项');
     } catch (e) {
       if (mounted) setState(() => _assets = []);
@@ -228,7 +235,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _pickCameraDir() async {
     final dir = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: '选择相机素材目录',
+      dialogTitle: '选择本地或相机素材文件夹',
     );
     if (dir != null && mounted) {
       setState(() {
@@ -469,6 +476,16 @@ class _HomePageState extends State<HomePage> {
             child: OutlinedButton.icon(
               onPressed: _exporting || _scanning || _findingCamera
                   ? null
+                  : _pickCameraDir,
+              icon: const Icon(Icons.folder_open),
+              label: const Text('选择本地素材文件夹'),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: OutlinedButton.icon(
+              onPressed: _exporting || _scanning || _findingCamera
+                  ? null
                   : _findCamera,
               icon: const Icon(Icons.usb),
               label: Text(_findingCamera ? '正在查找…' : '查找 USB 相机 / 存储卡'),
@@ -541,7 +558,8 @@ class _HomePageState extends State<HomePage> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
             child: Text(switch (_filter) {
               MediaKind.livePhoto => '网盘版保存到 baidu_live。先上传 1 张，用手机百度网盘保存到相册验证。小米、vivo、OPPO 兼容性待真机确认。',
-              MediaKind.video => '视频将导出至 movie 文件夹，保留原始拍摄时间，源文件不会被修改。',
+              MediaKind.video =>
+                '未识别到实况标记的视频仅供预览和原文件导出，不转成实况。视频将复制至 movie 文件夹，源文件不会被修改。',
               MediaKind.photo => '照片将导出至 photo 文件夹，保留原始拍摄时间，源文件不会被修改。',
             }, style: const TextStyle(fontSize: 11, color: Colors.black45)),
           ),
@@ -653,7 +671,7 @@ class _HomePageState extends State<HomePage> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Pocket 4P · USB 导入 · 百度网盘实况导出',
+                'Pocket 4P · USB / 本地素材 · 百度网盘实况导出',
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
               ),
             ],
@@ -757,8 +775,8 @@ class _HomePageState extends State<HomePage> {
                       _scanning
                           ? '正在读取素材…'
                           : _assets.isEmpty
-                          ? '连接 Pocket 4P，选择文件传输模式，\n点击「查找 USB 相机 / 存储卡」或手动选择素材目录。'
-                          : '此分类没有素材。\n没有识别到实况标记的视频会保留在「视频」分类，供后续检查。',
+                          ? '点击「选择本地素材文件夹」处理已复制到电脑的素材，\n或连接相机后点击「查找 USB 相机 / 存储卡」。'
+                          : '此分类没有素材。\n只有带实况标记的原始视频可导出实况；其余视频可在「视频」分类预览和复制。',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.black54),
                     ),

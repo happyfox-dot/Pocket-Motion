@@ -60,6 +60,32 @@ void main() {
     },
   );
 
+  test(
+    'local copies keep marker classification without a DJI folder layout',
+    () async {
+      final original = await file(
+        'camera/DJI_20261118120000_0001_D.MP4',
+        '\x00TPLG_VIDEO_LIVEPHOTO_4K_2997\x00',
+      );
+      final copiedDir = await Directory(p.join(root.path, '电脑素材', '旅行'))
+          .create(recursive: true);
+      await original.copy(p.join(copiedDir.path, '重命名的实况.mp4'));
+      await file('电脑素材/旅行/普通视频.MP4', '\x00TPLG_VIDEO_4K_2997\x00');
+      await file('电脑素材/旅行/没有标记.mp4', 'ordinary short clip');
+      final items = await MediaScanner().scan(p.join(root.path, '电脑素材'));
+      expect(items, hasLength(3));
+      expect(
+        items.singleWhere((a) => a.filename == '重命名的实况.mp4').kind,
+        MediaKind.livePhoto,
+      );
+      expect(items.where((a) => a.kind == MediaKind.video), hasLength(2));
+      expect(
+        await original.readAsString(),
+        '\x00TPLG_VIDEO_LIVEPHOTO_4K_2997\x00',
+      );
+    },
+  );
+
   test('empty or disconnected source reports an actionable error', () async {
     await expectLater(
       MediaScanner().scan(''),

@@ -41,7 +41,7 @@ void main() {
     await tester.tap(find.text('左上角').last);
     await tester.pumpAndSettle();
     expect(settings.position, WatermarkPosition.topLeft);
-    expect(settings.outputSuffix, '_WM_TL');
+    expect(settings.outputSuffix, '_WM_DJI1_TL');
     rebuild(() => locked = true);
     await tester.pump();
     expect(

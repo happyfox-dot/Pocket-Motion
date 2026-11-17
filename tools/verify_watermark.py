@@ -57,14 +57,15 @@ def packet_hashes(path, selector):
 def verify_pair(still, video, source, corner):
     data = probe(video)
     video_stream = next(s for s in data['streams'] if s['codec_type'] == 'video')
+    source_stream = next(s for s in probe(source)['streams'] if s['codec_type'] == 'video')
     duration = float(video_stream['duration'])
     cover_box = check_corner(still, corner)
     for instant in (0, duration / 2, max(0, duration - 0.1)):
         box = check_corner(video, corner, instant)
         assert all(abs(a - b) <= 3 for a, b in zip(cover_box, box)), (cover_box, box)
     assert packet_hashes(source, 'a') == packet_hashes(video, 'a'), 'Audio changed'
-    assert abs(duration - float(next(s for s in probe(source)['streams']
-                                     if s['codec_type'] == 'video')['duration'])) < 0.05
+    assert video_stream['nb_frames'] == source_stream['nb_frames'], 'Video frames lost or duplicated'
+    assert abs(duration - float(source_stream['duration'])) < 0.001, 'Video duration changed'
 
 
 def main(root):
@@ -97,7 +98,7 @@ def main(root):
                 assert pixels(video)[2] is None
                 assert packet_hashes(source, 'v') == packet_hashes(video, 'v')
                 assert packet_hashes(source, 'a') == packet_hashes(video, 'a')
-            if name == 'synthetic_BR_WM_BR':
+            if name == 'synthetic_BR_WM_DJI1_BR':
                 # Keep a decoded preview, clearly sourced from synthetic media.
                 run('ffmpeg', '-v', 'error', '-y', '-i', str(still), '-frames:v', '1',
                     str(root / 'watermark-preview.png'))

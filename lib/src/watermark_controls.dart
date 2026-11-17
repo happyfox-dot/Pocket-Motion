@@ -39,6 +39,16 @@ class WatermarkControls extends StatelessWidget {
                 ),
         ),
         if (settings.enabled) ...[
+          Container(
+            width: double.infinity,
+            color: const Color(0xFF24282D),
+            child: Image.asset(
+              WatermarkSettings.assetPath,
+              height: 64,
+              fit: BoxFit.contain,
+              semanticLabel: 'DJI Mimo Pocket 4P 机型水印字标',
+            ),
+          ),
           Row(
             children: [
               const Text('水印位置', style: TextStyle(fontSize: 12)),

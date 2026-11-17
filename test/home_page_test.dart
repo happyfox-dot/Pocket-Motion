@@ -15,9 +15,18 @@ void main() {
     await tester.pumpWidget(const DjiLiveApp());
     await tester.pump();
     expect(find.text('查找 USB 相机 / 存储卡'), findsOneWidget);
+    expect(find.text('选择本地素材文件夹'), findsOneWidget);
     final export = find.widgetWithText(FilledButton, '导出百度网盘实况 (.livp)');
     expect(export, findsOneWidget);
     expect(tester.widget<FilledButton>(export).onPressed, isNull);
+    await tester.tap(find.widgetWithText(ChoiceChip, '视频'));
+    await tester.pumpAndSettle();
+    expect(find.text('导出视频'), findsOneWidget);
+    expect(find.text('导出百度网盘实况 (.livp)'), findsNothing);
+    expect(find.text('导出为 Apple 实况照片'), findsNothing);
+    expect(find.text('添加机型水印'), findsNothing);
+    await tester.tap(find.widgetWithText(ChoiceChip, '实况'));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     // Shorter windows must still reach every action and the log panel.
     tester.view.physicalSize = const Size(960, 640);
